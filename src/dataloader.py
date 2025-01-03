@@ -289,6 +289,12 @@ class AudiosetDataset(Dataset):
         else:
             pass
 
+        if self.mode == 'eval':
+            # 전체 필터 뱅크를 무음으로 설정
+            fbank[:, :] = 0
+            # 이미지 데이터를 완전히 검은색으로 설정
+            # image[:, :, :] = 0
+
         if self.noise == True:
             #랜덤 노이즈
             fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
