@@ -29,7 +29,7 @@ def make_index_dict(label_csv):
         csv_reader = csv.DictReader(f)
         line_count = 0
         for row in csv_reader:
-            index_lookup[row['mid']] = row['index']
+            index_lookup[row['display_name']] = row['index']
             line_count += 1
     return index_lookup
 
@@ -133,7 +133,7 @@ class AudiosetDataset(Dataset):
     # change python list to numpy array to avoid memory leak.
     def pro_data(self, data_json):
         for i in range(len(data_json)):
-            data_json[i] = [data_json[i]['wav'], data_json[i]['labels'], data_json[i]['video_id'], data_json[i]['video_path']]
+            data_json[i] = [data_json[i]['wav'], data_json[i]['labels'], data_json[i]['id'], data_json[i]['img_path']]
         data_np = np.array(data_json, dtype=str)
         return data_np
 
@@ -142,24 +142,25 @@ class AudiosetDataset(Dataset):
         datum = {}
         datum['wav'] = np_data[0]
         datum['labels'] = np_data[1]
-        datum['video_id'] = np_data[2]
-        datum['video_path'] = np_data[3]
+        datum['id'] = np_data[2]
+        datum['img_path'] = np_data[3]
         return datum
+        
 
     def get_image(self, filename, filename2=None, mix_lambda=1):
         if filename2 == None:
-            img = Image.open(filename)
+            img = Image.open(filename).convert("RGB")  # 이미지를 열고 RGB로 변환
             image_tensor = self.preprocess(img)
             return image_tensor
-        else:
-            img1 = Image.open(filename)
-            image_tensor1 = self.preprocess(img1)
+        # else:
+        #     img1 = Image.open(filename)
+        #     image_tensor1 = self.preprocess(img1)
 
-            img2 = Image.open(filename2)
-            image_tensor2 = self.preprocess(img2)
+        #     img2 = Image.open(filename2)
+        #     image_tensor2 = self.preprocess(img2)
 
-            image_tensor = mix_lambda * image_tensor1 + (1 - mix_lambda) * image_tensor2
-            return image_tensor
+        #     image_tensor = mix_lambda * image_tensor1 + (1 - mix_lambda) * image_tensor2
+         #   return image_tensor
 
     def _wav2fbank(self, filename, filename2=None, mix_lambda=-1):
         # no mixup
@@ -239,7 +240,7 @@ class AudiosetDataset(Dataset):
                 fbank = torch.zeros([self.target_length, 128]) + 0.01
                 print('there is an error in loading audio')
             try:
-                image = self.get_image(self.randselect_img(datum['video_id'], datum['video_path']), self.randselect_img(mix_datum['video_id'], datum['video_path']), mix_lambda)
+                image = self.get_image(datum['img_path'], None , mix_lambda)
             except:
                 image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
                 print('there is an error in loading image')
@@ -261,7 +262,7 @@ class AudiosetDataset(Dataset):
                 fbank = torch.zeros([self.target_length, 128]) + 0.01
                 print('there is an error in loading audio')
             try:
-                image = self.get_image(self.randselect_img(datum['video_id'], datum['video_path']), None, 0)
+                image = self.get_image(datum['img_path'], None, 0)
             except:
                 image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
                 print('there is an error in loading image')
@@ -289,7 +290,10 @@ class AudiosetDataset(Dataset):
             pass
 
         if self.noise == True:
+            #랜덤 노이즈
             fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
+ 
+            #시간축 이동
             fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
 
         # fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
