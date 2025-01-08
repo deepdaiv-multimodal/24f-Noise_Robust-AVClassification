@@ -290,10 +290,21 @@ class AudiosetDataset(Dataset):
             pass
 
         if self.mode == 'eval':
-            # 전체 필터 뱅크를 무음으로 설정
-            fbank[:, :] = 0
-            # 이미지 데이터를 완전히 검은색으로 설정
-            # image[:, :, :] = 0
+          # 노이즈 유형과 선택 확률 정의
+          noise_types = ['none', 'random', 'gaussian', 'shift']
+          probabilities = [0.1, 0.4, 0.4, 0.1]  # none: 10%, random: 40%, gaussian: 40%, shift: 10%
+            
+          # 랜덤으로 노이즈 유형 선택
+          selected_noise = random.choices(noise_types, probabilities, k=1)[0]
+
+          if selected_noise == 'none': #무음
+                fbank[:, :] = 0
+          elif selected_noise == 'random': #랜덤 노이즈(일부)
+                fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
+          elif selected_noise == 'gaussian': #가우시안 노이즈(전체)
+                fbank = torch.normal(mean=0.0, std=0.05, size=fbank.shape)
+          elif selected_noise == 'shift': #시간축 이동
+                fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
 
         if self.noise == True:
             #랜덤 노이즈
