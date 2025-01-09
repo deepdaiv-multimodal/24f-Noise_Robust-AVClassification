@@ -217,34 +217,91 @@ def validate(audio_model, val_loader, args, output_pred=False):
 
     end = time.time()
     A_predictions, A_targets, A_loss = [], [], []
+    
+    # 노이즈 주입 활성화 여부를 args로 설정
+    noise_params = {
+        "noise_to_audio": args.noise_to_audio if hasattr(args, "noise_to_audio") else False,
+        "noise_to_vision": args.noise_to_vision if hasattr(args, "noise_to_vision") else False,
+    }
+    
     with torch.no_grad():
         for i, (a_input, v_input, labels) in enumerate(val_loader):
+            # 배치 데이터를 디바이스로 이동
             a_input = a_input.to(device)
             v_input = v_input.to(device)
+            labels = labels.to(device)
 
+            # 배치 단위 노이즈 주입
+            if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
+                a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
+            
+            # 모델 예측
             with autocast():
                 audio_output = audio_model(a_input, v_input, args.ftmode)
 
+            # 결과 수집
             predictions = audio_output.to('cpu').detach()
-
             A_predictions.append(predictions)
-            A_targets.append(labels)
+            A_targets.append(labels.to('cpu'))
 
-            labels = labels.to(device)
+            # 손실 계산
             loss = args.loss_fn(audio_output, labels)
             A_loss.append(loss.to('cpu').detach())
 
+            # 배치 시간 업데이트
             batch_time.update(time.time() - end)
             end = time.time()
 
+        # 전체 결과를 병합
         audio_output = torch.cat(A_predictions)
         target = torch.cat(A_targets)
         loss = np.mean(A_loss)
 
+        # 통계 계산
         stats = calculate_stats(audio_output, target)
 
     if output_pred == False:
         return stats, loss
     else:
-        # used for multi-frame evaluation (i.e., ensemble over frames), so return prediction and target
+        # multi-frame 평가를 위해 prediction과 target 반환
         return stats, audio_output, target
+    
+def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
+    if noise_params.get("noise_to_audio", False):
+        for i in range(batch_fbank.size(0)):
+            noise_type = random.choices(['none', 'random', 'gaussian', 'shift'], [0.1, 0.4, 0.4, 0.1])[0]
+            if noise_type == 'none':
+                batch_fbank[i, :, :] = 0  # Extreme: Entirely zero out
+            elif noise_type == 'random':
+                batch_fbank[i, :, :] += torch.rand_like(batch_fbank[i, :, :], device=batch_fbank.device) * np.random.rand()
+            elif noise_type == 'gaussian':
+                batch_fbank[i, :, :] += torch.normal(mean=0.0, std=1, size=batch_fbank[i, :, :].size(), device=batch_fbank.device)
+            elif noise_type == 'shift':
+                shift_value = np.random.randint(-batch_fbank.size(2) // 2, batch_fbank.size(2) // 2)  # Larger shifts
+                batch_fbank[i, :, :] = torch.roll(batch_fbank[i, :, :], shifts=shift_value, dims=1)
+
+    if noise_params.get("noise_to_vision", False):
+        for i in range(batch_image.size(0)):
+            noise_type = random.choices(['none', 'gaussian', 'blur', 'pixelate'], [0.2, 0.2, 0.2, 0.2])[0]
+            if noise_type == 'none':
+                batch_image[i, :, :, :] = 0  # Extreme: Entirely black out
+            elif noise_type == 'gaussian':
+                batch_image[i] += torch.normal(mean=0.0, std=1, size=batch_image[i].size(), device=batch_image.device)
+                batch_image[i] = torch.clamp(batch_image[i], 0, 1)
+            elif noise_type == 'blur':
+                kernel_size = 31  # Larger blur kernel
+                blur_kernel = torch.ones((3, 1, kernel_size, kernel_size), device=batch_image.device) / (kernel_size ** 2)
+                batch_image[i:i+1] = torch.nn.functional.conv2d(
+                    batch_image[i:i+1], blur_kernel, padding=kernel_size // 2, groups=3
+                )
+            elif noise_type == 'pixelate':
+                downsample_factor = 0.1  # More aggressive downsampling
+                height, width = batch_image[i].size(1), batch_image[i].size(2)
+                small_image = torch.nn.functional.interpolate(
+                    batch_image[i:i+1], scale_factor=downsample_factor, mode='bilinear'
+                )
+                batch_image[i:i+1] = torch.nn.functional.interpolate(
+                    small_image, size=(height, width), mode='nearest'
+                )
+
+    return batch_fbank, batch_image
