@@ -488,6 +488,8 @@ class CAVMAEFT(nn.Module):
 
         self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
 
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.additional_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         self.initialize_weights()
 
         print('Audio Positional Embedding Shape:', self.pos_embed_a.shape)
@@ -528,6 +530,34 @@ class CAVMAEFT(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, a, v, mode):
+        if mode == 'prompt_learning':
+            a = a.unsqueeze(1).transpose(2, 3)
+            a = self.patch_embed_a(a)
+            a = a + self.pos_embed_a + self.modality_a
+            for blk in self.blocks_a:
+                a = blk(a)
+
+            v = self.patch_embed_v(v)
+            v = v + self.pos_embed_v + self.modality_v
+            for blk in self.blocks_v:
+                v = blk(v)
+
+            batch_size = a.size(0)
+            additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
+
+            a = torch.cat([additional_token_expanded, a], dim=1)
+            v = torch.cat([additional_token_expanded, v], dim=1)
+
+            x = torch.cat((a, v), dim=1)
+            for blk in self.blocks_u:
+                x = blk(x)
+            x = self.norm(x)
+
+            x = x.mean(dim=1)
+            x = self.mlp_head(x)
+
+            return x
+        
         # multi-modal fine-tuning, our default method for fine-tuning
         if mode == 'multimodal':
             a = a.unsqueeze(1)
