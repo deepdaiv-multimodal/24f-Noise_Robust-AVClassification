@@ -62,9 +62,7 @@ class AudiosetDataset(Dataset):
     def __init__(self, 
                  dataset_json_file, 
                  audio_conf, 
-                 label_csv=None, 
-                 noise_to_audio=False, 
-                 noise_to_vision=False):
+                 label_csv=None):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -134,9 +132,6 @@ class AudiosetDataset(Dataset):
                 mean=[0.4850, 0.4560, 0.4060],
                 std=[0.2290, 0.2240, 0.2250]
             )])
-        
-        self.noise_to_audio = noise_to_audio
-        self.noise_to_vision = noise_to_vision
 
     # change python list to numpy array to avoid memory leak.
     def pro_data(self, data_json):
