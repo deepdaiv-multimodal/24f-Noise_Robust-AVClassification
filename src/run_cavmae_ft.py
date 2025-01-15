@@ -170,7 +170,7 @@ if args.wa == True:
     sdA = wa_model(args.exp_dir, start_epoch=args.wa_start, end_epoch=args.wa_end)
     torch.save(sdA, args.exp_dir + "/models/audio_model_wa.pth")
 else:
-    # if no wa, use the best checkpint
+    # if no wa, use the best c ㅂheckpint
     sdA = torch.load(args.exp_dir + '/models/best_audio_model.pth', map_location='cpu')
 msg = audio_model.load_state_dict(sdA, strict=True)
 print(msg)
