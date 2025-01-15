@@ -16,6 +16,7 @@ from torch import nn
 import numpy as np
 import pickle
 from torch.cuda.amp import autocast,GradScaler
+import matplotlib.pyplot as plt
 
 def train(audio_model, train_loader, test_loader, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -305,3 +306,12 @@ def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
                 )
 
     return batch_fbank, batch_image
+
+def save_images(batch_image, output_dir="output_images"):
+    # Create directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Iterate through the batch and save each image
+    for i in range(batch_image.size(0)):
+        image = batch_image[i].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C)
+        plt.imsave(os.path.join(output_dir, f"image_{i}.png"), image)
