@@ -15,6 +15,67 @@ from timm.models.layers import to_2tuple, trunc_normal_, DropPath
 from timm.models.vision_transformer import Attention, Mlp, PatchEmbed, Block
 from .pos_embed import get_2d_sincos_pos_embed
 
+class BlockWithAttentionPrompt(nn.Module):
+    def __init__(self, dim, num_heads, prompt_length, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        # 기존 Self-Attention
+        self.norm1_a = norm_layer(dim)
+        self.norm1_v = norm_layer(dim)
+        self.self_attn_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.self_attn_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Cross Attention
+        self.cross_attn_a_to_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.cross_attn_v_to_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Prompt Parameters
+        self.prompt_a = nn.Parameter(torch.randn(prompt_length, dim))
+        self.prompt_v = nn.Parameter(torch.randn(prompt_length, dim))
+
+        # Feed Forward Network (MLP)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp_a = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp_v = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+        # Regularization
+        self.norm2_a = norm_layer(dim)
+        self.norm2_v = norm_layer(dim)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, a, v):
+        # Self-Attention
+        a_res, v_res = a, v
+        a, _ = self.self_attn_a(self.norm1_a(a), self.norm1_a(a), self.norm1_a(a))
+        v, _ = self.self_attn_v(self.norm1_v(v), self.norm1_v(v), self.norm1_v(v))
+        a = a_res + self.drop_path(a)
+        v = v_res + self.drop_path(v)
+
+        # Cross Attention with Prompts
+        a_res, v_res = a, v
+
+        # Prompt 추가
+        prompt_a = self.prompt_a.expand(a.size(0), -1, -1).permute(1, 0, 2)  # (prompt_length, batch_size,dim)
+        prompt_v = self.prompt_v.expand(v.size(0), -1, -1).permute(1, 0, 2)  # (prompt_length, batch_size,dim)
+
+        a_, v_ = a.permute(1, 0, 2), v.permute(1, 0, 2)  # (sequence_length, batch_size,dim)
+
+        # Concatenate 입력과 프롬프트
+        v_with_prompt = torch.cat((prompt_v, v_), dim=0)  # seq_len = prompt_length + sequence_length
+        a_with_prompt = torch.cat((prompt_a, a_), dim=0)
+
+        a, _ = self.cross_attn_a_to_v(a_, v_with_prompt, v_with_prompt)
+        v, _ = self.cross_attn_v_to_a(v_, a_with_prompt, a_with_prompt)
+        v, a = v.permute(1, 0, 2), a.permute(1, 0, 2)
+
+        a = a_res + self.drop_path(a)
+        v = v_res + self.drop_path(v)
+
+        # Feed Forward Network (MLP)
+        a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a)))
+        v = v_res + self.drop_path(self.mlp_v(self.norm2_v(v)))
+
+        return a, v
+
 class BlockWithImprovedCrossAttention(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
