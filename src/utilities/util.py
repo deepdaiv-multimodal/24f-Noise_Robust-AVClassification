@@ -298,6 +298,54 @@ def load_progress(prog_pkl, quiet=False):
 def count_parameters(model):
     return sum([p.numel() for p in model.parameters() if p.requires_grad])
 
+def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
+    both_noise = noise_params.get("noise_to_audio", False) and noise_params.get("noise_to_vision", False)
+    
+    # 노이즈 강도 조정
+    audio_gaussian_std = 10.0 if not both_noise else 1.0  # 훨씬 큰 std 적용
+    vision_gaussian_std = 5.0 if not both_noise else 0.5  # 훨씬 큰 std 적용
+    vision_blur_kernel = 51 if not both_noise else 7      # blur kernel 약화
+    vision_pixelate_factor = 0.05 if not both_noise else 0.3
+
+    # 오디오 노이즈
+    if noise_params.get("noise_to_audio", False):
+        audio_noise_types = ['gaussian', 'shift', 'time_mask'] if both_noise else ['gaussian', 'shift', 'time_mask']
+        for i in range(batch_fbank.size(0)):
+            noise_type = random.choice(audio_noise_types)
+
+            if noise_type == 'gaussian':
+                batch_fbank[i, :, :] += torch.normal(mean=0.0, std=audio_gaussian_std, size=batch_fbank[i, :, :].size(), device=batch_fbank.device)
+            elif noise_type == 'shift':
+                shift_value = np.random.randint(-batch_fbank.size(2) // 2, batch_fbank.size(2) // 2)
+                batch_fbank[i, :, :] = torch.roll(batch_fbank[i, :, :], shifts=shift_value, dims=1)
+            elif noise_type == 'time_mask':
+                # SpecAugment에서 사용하는 시간 마스킹 기법
+                time_mask_size = np.random.randint(0, batch_fbank.size(2) // 4)
+                time_start = np.random.randint(0, batch_fbank.size(2) - time_mask_size)
+                batch_fbank[i, :, time_start:time_start + time_mask_size] = 0
+
+    # 비주얼 노이즈
+    if noise_params.get("noise_to_vision", False):
+        vision_noise_types = ['gaussian', 'blur', 'pixelate'] if both_noise else ['gaussian', 'blur', 'pixelate']
+        for i in range(batch_image.size(0)):
+            noise_type = 'none' #random.choice(vision_noise_types)
+            if noise_type == 'none':
+                # black image.
+                batch_image[i] = torch.zeros_like(batch_image[i])
+
+            elif noise_type == 'gaussian':
+                batch_image[i] += torch.normal(mean=0.0, std=vision_gaussian_std, size=batch_image[i].size(), device=batch_image.device)
+                batch_image[i] = torch.clamp(batch_image[i], -3, 3)
+            elif noise_type == 'blur':
+                blur_kernel = torch.ones((3, 1, vision_blur_kernel, vision_blur_kernel), device=batch_image.device) / (vision_blur_kernel ** 2)
+                batch_image[i:i+1] = torch.nn.functional.conv2d(batch_image[i:i+1], blur_kernel, padding=vision_blur_kernel // 2, groups=3)
+            elif noise_type == 'pixelate':
+                height, width = batch_image[i].size(1), batch_image[i].size(2)
+                small_image = torch.nn.functional.interpolate(batch_image[i:i+1], scale_factor=vision_pixelate_factor, mode='bilinear')
+                batch_image[i:i+1] = torch.nn.functional.interpolate(small_image, size=(height, width), mode='nearest')
+
+    return batch_fbank, batch_image
+
 PrenetConfig = namedtuple(
   'PrenetConfig', ['input_size', 'hidden_size', 'num_layers', 'dropout'])
 

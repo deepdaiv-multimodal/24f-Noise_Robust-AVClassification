@@ -18,6 +18,8 @@ import pickle
 from torch.cuda.amp import autocast,GradScaler
 import matplotlib.pyplot as plt
 
+from utilities import apply_noise_to_batch
+
 def train(audio_model, train_loader, test_loader, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('running on ' + str(device))
@@ -238,7 +240,7 @@ def validate(audio_model, val_loader, args, output_pred=False):
             
             # 모델 예측
             with autocast():
-                audio_output = audio_model(a_input, v_input, args.ftmode)
+                audio_output = audio_model(a_input, v_input, 'multimodal')
 
             # 결과 수집
             predictions = audio_output.to('cpu').detach()
@@ -266,46 +268,6 @@ def validate(audio_model, val_loader, args, output_pred=False):
     else:
         # multi-frame 평가를 위해 prediction과 target 반환
         return stats, audio_output, target
-    
-def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
-    if noise_params.get("noise_to_audio", False):
-        for i in range(batch_fbank.size(0)):
-            noise_type = random.choices(['none', 'random', 'gaussian', 'shift'], [0.1, 0.4, 0.4, 0.1])[0]
-            if noise_type == 'none':
-                batch_fbank[i, :, :] = 0  # Extreme: Entirely zero out
-            elif noise_type == 'random':
-                batch_fbank[i, :, :] += torch.rand_like(batch_fbank[i, :, :], device=batch_fbank.device) * np.random.rand()
-            elif noise_type == 'gaussian':
-                batch_fbank[i, :, :] += torch.normal(mean=0.0, std=1, size=batch_fbank[i, :, :].size(), device=batch_fbank.device)
-            elif noise_type == 'shift':
-                shift_value = np.random.randint(-batch_fbank.size(2) // 2, batch_fbank.size(2) // 2)  # Larger shifts
-                batch_fbank[i, :, :] = torch.roll(batch_fbank[i, :, :], shifts=shift_value, dims=1)
-
-    if noise_params.get("noise_to_vision", False):
-        for i in range(batch_image.size(0)):
-            noise_type = random.choices(['none', 'gaussian', 'blur', 'pixelate'], [0.2, 0.2, 0.2, 0.2])[0]
-            if noise_type == 'none':
-                batch_image[i, :, :, :] = 0  # Extreme: Entirely black out
-            elif noise_type == 'gaussian':
-                batch_image[i] += torch.normal(mean=0.0, std=1, size=batch_image[i].size(), device=batch_image.device)
-                batch_image[i] = torch.clamp(batch_image[i], 0, 1)
-            elif noise_type == 'blur':
-                kernel_size = 31  # Larger blur kernel
-                blur_kernel = torch.ones((3, 1, kernel_size, kernel_size), device=batch_image.device) / (kernel_size ** 2)
-                batch_image[i:i+1] = torch.nn.functional.conv2d(
-                    batch_image[i:i+1], blur_kernel, padding=kernel_size // 2, groups=3
-                )
-            elif noise_type == 'pixelate':
-                downsample_factor = 0.1  # More aggressive downsampling
-                height, width = batch_image[i].size(1), batch_image[i].size(2)
-                small_image = torch.nn.functional.interpolate(
-                    batch_image[i:i+1], scale_factor=downsample_factor, mode='bilinear'
-                )
-                batch_image[i:i+1] = torch.nn.functional.interpolate(
-                    small_image, size=(height, width), mode='nearest'
-                )
-
-    return batch_fbank, batch_image
 
 def save_images(batch_image, output_dir="output_images"):
     # Create directory if it doesn't exist
