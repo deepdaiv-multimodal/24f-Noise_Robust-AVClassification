@@ -28,7 +28,7 @@ pretrain_path=${cur_dir}/cav-mae-scale++.pth
 freeze_base=False
 head_lr=10 # newly initialized ft layers uses 10 times larger than the base lr
 
-bal=bal
+# bal=
 lr=1e-4
 epoch=10
 lrscheduler_start=2
@@ -49,17 +49,17 @@ batch_size=48
 label_smooth=0.1
 
 dataset=vggsound
-tr_data=/data/sls/scratch/yuangong/cav-mae/pretrained_model/datafiles/vggsound/vgg_train_cleaned.json
-te_data=/data/sls/scratch/yuangong/cav-mae/pretrained_model/datafiles/vggsound/vgg_test_cleaned.json
+tr_data=train.json
+te_data=test.json
 
 exp_dir=./exp/testmae02-${dataset}-${model}-${lr}-${lrscheduler_start}-${lrscheduler_decay}-${lrscheduler_step}-bs${batch_size}-lda${lr_adapt}-${ftmode}-fz${freeze_base}-h${head_lr}-a5
 mkdir -p $exp_dir
 
 CUDA_CACHE_DISABLE=1 python -W ignore ../../src/run_cavmae_ft.py --model ${model} --dataset ${dataset} \
 --data-train ${tr_data} --data-val ${te_data} --exp-dir $exp_dir \
---label-csv /data/sls/scratch/yuangong/cav-mae/pretrained_model/datafiles/vggsound/class_labels_indices_vgg.csv --n_class 10 \
+--label-csv class_labels_indices_urban.csv --n_class 10 \
 --lr $lr --n-epochs ${epoch} --batch-size $batch_size --save_model True \
---freqm $freqm --timem $timem --mixup ${mixup} --bal ${bal} \
+--freqm $freqm --timem $timem --mixup ${mixup} \
 --label_smooth ${label_smooth} \
 --lrscheduler_start ${lrscheduler_start} --lrscheduler_decay ${lrscheduler_decay} --lrscheduler_step ${lrscheduler_step} \
 --dataset_mean ${dataset_mean} --dataset_std ${dataset_std} --target_length ${target_length} --noise ${noise} \

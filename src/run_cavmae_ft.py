@@ -78,6 +78,9 @@ parser.add_argument("--head_lr", type=float, default=50.0, help="learning rate r
 parser.add_argument('--freeze_base', help='freeze the backbone or not', type=ast.literal_eval)
 parser.add_argument('--skip_frame_agg', help='if do frame agg', type=ast.literal_eval)
 
+parser.add_argument('--noise_to_audio', help='if add noise to audio', action='store_true')
+parser.add_argument('--noise_to_vision', help='if add noise to image', action='store_true')
+
 args = parser.parse_args()
 
 # all exp in this work is based on 224 * 224 image
@@ -97,21 +100,21 @@ if args.bal == 'bal':
     sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
 
     train_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf),
+        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
         batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 else:
     print('balanced sampler is not used')
     train_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf),
+        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf,),
         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 val_loader = torch.utils.data.DataLoader(
-    dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf),
+    dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
     batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 if args.data_eval != None:
     eval_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=val_audio_conf),
+        dataloader.AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=val_audio_conf,),
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
 if args.model == 'cav-mae-ft':
@@ -177,7 +180,7 @@ audio_model.eval()
 if args.skip_frame_agg == True:
     val_audio_conf['frame_use'] = 5
     val_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf),
+        dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
     stats, audio_output, target = validate(audio_model, val_loader, args, output_pred=True)
     if args.metrics == 'mAP':
@@ -193,7 +196,7 @@ else:
     for frame in range(total_frames):
         val_audio_conf['frame_use'] = frame
         val_loader = torch.utils.data.DataLoader(
-            dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf),
+            dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
             batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
         stats, audio_output, target = validate(audio_model, val_loader, args, output_pred=True)
         print(audio_output.shape)

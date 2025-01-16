@@ -59,7 +59,10 @@ def preemphasis(signal,coeff=0.97):
     return np.append(signal[0],signal[1:]-coeff*signal[:-1])
 
 class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, audio_conf, label_csv=None):
+    def __init__(self, 
+                 dataset_json_file, 
+                 audio_conf, 
+                 label_csv=None):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -289,29 +292,72 @@ class AudiosetDataset(Dataset):
         else:
             pass
 
-        if self.mode == 'eval':
-          # 노이즈 유형과 선택 확률 정의
-          noise_types = ['none', 'random', 'gaussian', 'shift']
-          probabilities = [0.1, 0.4, 0.4, 0.1]  # none: 10%, random: 40%, gaussian: 40%, shift: 10%
+        # if self.mode == 'eval':
+        #     if self.noise_to_audio:
+        #         # 노이즈 유형과 선택 확률 정의
+        #         noise_types = ['none', 'random', 'gaussian', 'shift']
+        #         probabilities = [0.0, 0.5, 0.5, 0.0]  # none: 10%, random: 40%, gaussian: 40%, shift: 10%
+                    
+        #         # 랜덤으로 노이즈 유형 선택
+        #         selected_noise = random.choices(noise_types, probabilities, k=1)[0]
+
+        #         if selected_noise == 'none': #무음
+        #                 fbank[:, :] = 0
+        #         elif selected_noise == 'random': #랜덤 노이즈(일부)
+        #                 fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
+        #         elif selected_noise == 'gaussian': #가우시안 노이즈(전체)
+        #                 fbank = torch.normal(mean=0.0, std=0.05, size=fbank.shape)
+        #         elif selected_noise == 'shift': #시간축 이동
+        #                 fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
             
-          # 랜덤으로 노이즈 유형 선택
-          selected_noise = random.choices(noise_types, probabilities, k=1)[0]
+        #     if self.noise_to_vision:
+        #         # 노이즈 유형과 동일 확률로 설정
+        #         noise_types = ['none', 'gaussian', 'blur', 'pixelate', 'invert']
+        #         probabilities = [0.2] * len(noise_types)  # 모든 노이즈 유형의 확률 동일
 
-          if selected_noise == 'none': #무음
-                fbank[:, :] = 0
-          elif selected_noise == 'random': #랜덤 노이즈(일부)
-                fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
-          elif selected_noise == 'gaussian': #가우시안 노이즈(전체)
-                fbank = torch.normal(mean=0.0, std=0.05, size=fbank.shape)
-          elif selected_noise == 'shift': #시간축 이동
-                fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
+        #         # 랜덤으로 노이즈 유형 선택
+        #         selected_noise = random.choices(noise_types, probabilities, k=1)[0]
 
-        if self.noise == True:
-            #랜덤 노이즈
-            fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
+        #         if selected_noise == 'none':  # 검정 처리 (높은 확률)
+        #             image = torch.zeros_like(image)  # 완전히 검정으로 변경
+
+        #         elif selected_noise == 'gaussian':  # 가우시안 노이즈 (강한 노이즈)
+        #             image += torch.normal(mean=0.0, std=0.2, size=image.shape)  # 표준편차를 크게 설정
+        #             image = torch.clamp(image, 0, 1)  # 픽셀 값 클리핑
+
+        #         elif selected_noise == 'blur':  # 블러 (강한 블러 효과)
+        #             kernel_size = 15  # 커널 크기를 크게 설정하여 강한 블러 적용
+        #             blur_kernel = torch.ones((kernel_size, kernel_size)) / (kernel_size ** 2)
+        #             image = torch.nn.functional.conv2d(
+        #                 image.unsqueeze(0).unsqueeze(0),  # 차원 확장
+        #                 blur_kernel.unsqueeze(0).unsqueeze(0),
+        #                 padding=kernel_size // 2
+        #             ).squeeze()
+
+        #         elif selected_noise == 'pixelate':  # 픽셀화 (강한 픽셀화)
+        #             downsample_factor = 2  # 매우 낮은 해상도로 다운샘플
+        #             height, width = image.shape[0], image.shape[1]
+        #             small_image = torch.nn.functional.interpolate(
+        #                 image.unsqueeze(0).unsqueeze(0), 
+        #                 scale_factor=1/downsample_factor, 
+        #                 mode='bilinear'
+        #             )
+        #             image = torch.nn.functional.interpolate(
+        #                 small_image, size=(height, width), mode='nearest'
+        #             ).squeeze()
+
+        #         elif selected_noise == 'invert':  # 색상 반전
+        #             image = 1.0 - image  # 색상 반전
+        #             image += torch.normal(mean=0.0, std=0.1, size=image.shape)  # 반전 후 약간의 노이즈 추가
+        #             image = torch.clamp(image, 0, 1)  # 값 범위 제한
+
+        # if self.noise == True:
+        #     #랜덤 노이즈
+        #     fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
  
-            #시간축 이동
-            fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
+        #     #시간축 이동
+        #     fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
+        
 
         # fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
         return fbank, image, label_indices

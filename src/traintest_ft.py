@@ -16,6 +16,9 @@ from torch import nn
 import numpy as np
 import pickle
 from torch.cuda.amp import autocast,GradScaler
+import matplotlib.pyplot as plt
+
+from utilities import apply_noise_to_batch
 
 def train(audio_model, train_loader, test_loader, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -217,34 +220,60 @@ def validate(audio_model, val_loader, args, output_pred=False):
 
     end = time.time()
     A_predictions, A_targets, A_loss = [], [], []
+    
+    # 노이즈 주입 활성화 여부를 args로 설정
+    noise_params = {
+        "noise_to_audio": args.noise_to_audio if hasattr(args, "noise_to_audio") else False,
+        "noise_to_vision": args.noise_to_vision if hasattr(args, "noise_to_vision") else False,
+    }
+    
     with torch.no_grad():
         for i, (a_input, v_input, labels) in enumerate(val_loader):
+            # 배치 데이터를 디바이스로 이동
             a_input = a_input.to(device)
             v_input = v_input.to(device)
-
-            with autocast():
-                audio_output = audio_model(a_input, v_input, args.ftmode)
-
-            predictions = audio_output.to('cpu').detach()
-
-            A_predictions.append(predictions)
-            A_targets.append(labels)
-
             labels = labels.to(device)
+
+            # 배치 단위 노이즈 주입
+            if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
+                a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
+            
+            # 모델 예측
+            with autocast():
+                audio_output = audio_model(a_input, v_input, 'multimodal')
+
+            # 결과 수집
+            predictions = audio_output.to('cpu').detach()
+            A_predictions.append(predictions)
+            A_targets.append(labels.to('cpu'))
+
+            # 손실 계산
             loss = args.loss_fn(audio_output, labels)
             A_loss.append(loss.to('cpu').detach())
 
+            # 배치 시간 업데이트
             batch_time.update(time.time() - end)
             end = time.time()
 
+        # 전체 결과를 병합
         audio_output = torch.cat(A_predictions)
         target = torch.cat(A_targets)
         loss = np.mean(A_loss)
 
+        # 통계 계산
         stats = calculate_stats(audio_output, target)
 
     if output_pred == False:
         return stats, loss
     else:
-        # used for multi-frame evaluation (i.e., ensemble over frames), so return prediction and target
+        # multi-frame 평가를 위해 prediction과 target 반환
         return stats, audio_output, target
+
+def save_images(batch_image, output_dir="output_images"):
+    # Create directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Iterate through the batch and save each image
+    for i in range(batch_image.size(0)):
+        image = batch_image[i].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C)
+        plt.imsave(os.path.join(output_dir, f"image_{i}.png"), image)
