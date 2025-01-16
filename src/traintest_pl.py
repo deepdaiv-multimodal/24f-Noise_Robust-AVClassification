@@ -72,7 +72,11 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
     for param in audio_model.parameters():
         param.requires_grad = False
         
-    audio_model.module.additional_token.requires_grad = True
+    # audio_model.module.additional_token.requires_grad = True
+    # 프롬프트 파라미터만 학습 가능하도록 설정
+    for name, param in audio_model.named_parameters():
+        if "prompt" in name:  # 프롬프트 관련 파라미터만 학습
+            param.requires_grad = True
 
     # 학습 가능한 파라미터 출력
     trainables = [p for p in audio_model.parameters() if p.requires_grad]
@@ -82,7 +86,12 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
         if param.requires_grad:
             print(f"Trainable parameter: {name}, shape: {param.shape}")
             
-    optimizer = torch.optim.Adam([audio_model.module.additional_token], lr=args.lr, weight_decay=5e-7, betas=(0.95, 0.999))    
+    #optimizer = torch.optim.Adam([audio_model.module.additional_token], lr=args.lr, weight_decay=5e-7, betas=(0.95, 0.999))    
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, audio_model.parameters()),
+        lr=args.lr,
+        weight_decay=5e-7,
+    )
 
     # Learning Rate Scheduler 설정
     if args.lr_adapt:
@@ -171,10 +180,9 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
             # Best 모델 저장
             if loss_meter.avg < best_loss:
                 best_loss = loss_meter.avg
-                additional_token = audio_model.module.additional_token if isinstance(audio_model, nn.DataParallel) else audio_model.additional_token
+                torch.save(audio_model.state_dict(), save_path)
+                print(f"Best model saved at {save_path} with loss: {best_loss:.4f}")
 
-                torch.save(additional_token.detach().cpu(), save_path)
-                print(f"Best model updated. Additional token saved at {save_path}")
 
             end_time = time.time()
             global_step += 1
@@ -219,16 +227,17 @@ def validate_pl(audio_model, val_loader, args, output_pred=False):
             labels = labels.to(device)
             
             if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
-                a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
+              a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
             
             # shape : (1, 1, hidden_dim)
-            complete_token = torch.load(f"{args.exp_dir}/complete.pth").to(device)
-            audio_only_token = torch.load(f"{args.exp_dir}/audio_only.pth").to(device)
-            vision_only_token = torch.load(f"{args.exp_dir}/vision_only.pth").to(device)
-            noise_to_both_token = torch.load(f"{args.exp_dir}/noise_to_both.pth").to(device)
+            # complete_token = torch.load(f"{args.exp_dir}/complete.pth").to(device)
+            #audio_only_token = torch.load(f"{args.exp_dir}/audio_only.pth").to(device)
+            # vision_only_token = torch.load(f"{args.exp_dir}/vision_only.pth").to(device)
+            # noise_to_both_token = torch.load(f"{args.exp_dir}/noise_to_both.pth").to(device)
             # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-            additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
-            
+            #additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
+            #additional_token = torch.cat([noise_to_both_token], dim=1)
+
             with autocast():
                 audio_output_pl = audio_model(a_input, v_input, 'prompt_learning')
                 # audio_output = audio_model(a_input, v_input, 'multimodal')
