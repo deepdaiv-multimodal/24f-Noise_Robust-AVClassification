@@ -24,6 +24,11 @@ from tqdm import tqdm
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
+import os
+import matplotlib.pyplot as plt
+import soundfile as sf
+
+from utilities import apply_noise_to_batch
 
 def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vision=False):
     
@@ -101,7 +106,7 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
 
     print(f"Current #steps={global_step}, #epochs={epoch}")
     print("Start training...")
-    result = np.zeros([args.n_epochs, 4])
+
     audio_model.train()
 
     total_start_time = time.time()
@@ -118,7 +123,19 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
         for i, (a_input, v_input, labels) in enumerate(epoch_loader):
             B = int(args.proportion * a_input.size(0))
             a_input, v_input, labels = a_input[:B], v_input[:B], labels[:B]
+            a_input, v_input = apply_noise_to_batch(a_input, v_input, {"noise_to_audio": noise_to_audio, "noise_to_vision": noise_to_vision})
 
+            if args.save_data:
+                os.makedirs(f"{args.exp_dir}/images", exist_ok=True)
+                os.makedirs(f"{args.exp_dir}/audio", exist_ok=True)
+
+                for i in range(a_input.size(0)):
+                    # 비전 데이터 저장 (이미지)
+                    plt.imsave(f"{args.exp_dir}/images/{global_step}_{i}.png", v_input[i].permute(1, 2, 0).cpu().numpy())
+
+                    # 오디오 데이터 저장 (WAV)
+                    audio_path = f"{args.exp_dir}/audio/{global_step}_{i}.wav"
+                    save_audio(a_input[i], sample_rate=16000, file_path=audio_path)
             a_input, v_input = a_input.to(device), v_input.to(device)
             labels = labels.to(device, non_blocking=True)
 
@@ -172,50 +189,14 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
     print(f"\n🎉 Total Training Time: {int(hours):02d}h {int(minutes):02d}m {int(seconds):02d}s 🎉")
 
 
-def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
-    both_noise = noise_params.get("noise_to_audio", False) and noise_params.get("noise_to_vision", False)
+def validate_pl(audio_model, val_loader, args, output_pred=False):
     
-    # 노이즈 강도 조정 (둘 다 True면 줄임)
-    audio_gaussian_std = 3.0 if not both_noise else 1.0
-    vision_gaussian_std = 1.5 if not both_noise else 0.5
-    vision_blur_kernel = 51 if not both_noise else 15
-    vision_pixelate_factor = 0.05 if not both_noise else 0.3
+    if args.loss == 'BCE':
+        loss_fn = nn.BCEWithLogitsLoss()
+    elif args.loss == 'CE':
+        loss_fn = nn.CrossEntropyLoss()
+    args.loss_fn = loss_fn
 
-    # 오디오 노이즈
-    if noise_params.get("noise_to_audio", False):
-        for i in range(batch_fbank.size(0)):
-            noise_type = random.choices(['none', 'random', 'gaussian', 'shift'], [0.3, 0.2, 0.4, 0.1])[0]
-            if noise_type == 'none':
-                batch_fbank[i, :, :] = 0  # 전체 0으로 초기화
-            elif noise_type == 'random':
-                batch_fbank[i, :, :] += torch.rand_like(batch_fbank[i, :, :], device=batch_fbank.device) * np.random.uniform(0.5, 1.5)
-            elif noise_type == 'gaussian':
-                batch_fbank[i, :, :] += torch.normal(mean=0.0, std=audio_gaussian_std, size=batch_fbank[i, :, :].size(), device=batch_fbank.device)
-            elif noise_type == 'shift':
-                shift_value = np.random.randint(-batch_fbank.size(2), batch_fbank.size(2))  # 더 큰 시프트
-                batch_fbank[i, :, :] = torch.roll(batch_fbank[i, :, :], shifts=shift_value, dims=1)
-
-    # 비주얼 노이즈
-    if noise_params.get("noise_to_vision", False):
-        for i in range(batch_image.size(0)):
-            noise_type = random.choices(['none', 'gaussian', 'blur', 'pixelate'], [0.2, 0.3, 0.3, 0.2])[0]
-            if noise_type == 'none':
-                batch_image[i, :, :, :] = 0  # 전체 0으로 초기화
-            elif noise_type == 'gaussian':
-                batch_image[i] += torch.normal(mean=0.0, std=vision_gaussian_std, size=batch_image[i].size(), device=batch_image.device)
-                batch_image[i] = torch.clamp(batch_image[i], -3, 3)  # 클램핑으로 데이터 범위 제한
-            elif noise_type == 'blur':
-                blur_kernel = torch.ones((3, 1, vision_blur_kernel, vision_blur_kernel), device=batch_image.device) / (vision_blur_kernel ** 2)
-                batch_image[i:i+1] = torch.nn.functional.conv2d(batch_image[i:i+1], blur_kernel, padding=vision_blur_kernel // 2, groups=3)
-            elif noise_type == 'pixelate':
-                height, width = batch_image[i].size(1), batch_image[i].size(2)
-                small_image = torch.nn.functional.interpolate(batch_image[i:i+1], scale_factor=vision_pixelate_factor, mode='bilinear')
-                batch_image[i:i+1] = torch.nn.functional.interpolate(small_image, size=(height, width), mode='nearest')
-
-    return batch_fbank, batch_image
-
-
-def validate_pl(audio_model, val_loader, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_time = AverageMeter()
     if not isinstance(audio_model, nn.DataParallel):
@@ -224,42 +205,74 @@ def validate_pl(audio_model, val_loader, args):
     audio_model.eval()
 
     end = time.time()
-    A_loss, A_loss_mae, A_loss_mae_a, A_loss_mae_v, A_loss_c, A_c_acc = [], [], [], [], [], []
+    A_predictions_pl, A_targets_pl, A_loss_pl = [], [], []
+    A_preditions, A_targets, A_loss = [], [], []
+    
+    noise_params = {
+        "noise_to_audio": args.noise_to_audio if hasattr(args, "noise_to_audio") else False,
+        "noise_to_vision": args.noise_to_vision if hasattr(args, "noise_to_vision") else False,
+    }
     with torch.no_grad():
-        for i, (a_input, v_input, _) in enumerate(val_loader):
+        for i, (a_input, v_input, labels) in enumerate(val_loader):
             a_input = a_input.to(device)
             v_input = v_input.to(device)
-            # additional_token을 입력 앞에 추가 (4개 모두 concat)
+            labels = labels.to(device)
+            
+            if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
+                a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
+            
+            # shape : (1, 1, hidden_dim)
             complete_token = torch.load(f"{args.exp_dir}/complete.pth").to(device)
             audio_only_token = torch.load(f"{args.exp_dir}/audio_only.pth").to(device)
             vision_only_token = torch.load(f"{args.exp_dir}/vision_only.pth").to(device)
             noise_to_both_token = torch.load(f"{args.exp_dir}/noise_to_both.pth").to(device)
-            tokens = [complete_token, audio_only_token, vision_only_token, noise_to_both_token]
-            a_input = torch.cat([token.expand(a_input.size(0), -1) for token in tokens], dim=1)
-            v_input = torch.cat([token.expand(v_input.size(0), -1) for token in tokens], dim=1)
+            # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
+            additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
             
             with autocast():
-                loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, mask_a, mask_v, c_acc = audio_model(a_input, v_input, args.masking_ratio, args.masking_ratio, mae_loss_weight=args.mae_loss_weight, contrast_loss_weight=args.contrast_loss_weight, mask_mode=args.mask_mode)
-                loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, c_acc = loss.sum(), loss_mae.sum(), loss_mae_a.sum(), loss_mae_v.sum(), loss_c.sum(), c_acc.mean()
-            A_loss.append(loss.to('cpu').detach())
-            A_loss_mae.append(loss_mae.to('cpu').detach())
-            A_loss_mae_a.append(loss_mae_a.to('cpu').detach())
-            A_loss_mae_v.append(loss_mae_v.to('cpu').detach())
-            A_loss_c.append(loss_c.to('cpu').detach())
-            A_c_acc.append(c_acc.to('cpu').detach())
+                audio_output_pl = audio_model(a_input, v_input, 'prompt_learning')
+                # audio_output = audio_model(a_input, v_input, 'multimodal')
+            # 결과 수집
+            predictions_pl = audio_output_pl.to('cpu').detach()
+            A_predictions_pl.append(predictions_pl)
+            A_targets_pl.append(labels.to('cpu'))
+            
+            # predictions = audio_output.to('cpu').detach()
+            # A_preditions.append(predictions)
+            # A_targets.append(labels.to('cpu'))
+            
+            # 손실 계산
+            loss_pl = args.loss_fn(audio_output_pl, labels)
+            A_loss_pl.append(loss_pl.to('cpu').detach())
+            
+            # loss = args.loss_fn(audio_output, labels)
+            # A_loss.append(loss.to('cpu').detach())
+
+            # 배치 시간 업데이트
             batch_time.update(time.time() - end)
             end = time.time()
 
-        loss = np.mean(A_loss)
-        loss_mae = np.mean(A_loss_mae)
-        loss_mae_a = np.mean(A_loss_mae_a)
-        loss_mae_v = np.mean(A_loss_mae_v)
-        loss_c = np.mean(A_loss_c)
-        c_acc = np.mean(A_c_acc)
+        # 전체 결과를 병합
+        audio_output_pl = torch.cat(A_predictions_pl)
+        target_pl = torch.cat(A_targets_pl)
+        loss_pl = np.mean(A_loss_pl)
 
-    return loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, c_acc
+        # audio_output = torch.cat(A_preditions)
+        # target = torch.cat(A_targets)
+        # loss = np.mean(A_loss)
+        
+        # 통계 계산
+        stats_pl = calculate_stats(audio_output_pl, target_pl)
+        # stats = calculate_stats(audio_output, target)
 
-def save_data(a_input, v_input, filename):
-    with open(filename, 'wb') as f:
-        pickle.dump((a_input, v_input), f)
-    print(f"Data saved to {filename}")
+    if output_pred == False:
+        return stats_pl, loss_pl
+    else:
+        # multi-frame 평가를 위해 prediction과 target 반환
+        return stats_pl, audio_output_pl, target_pl
+
+def save_audio(audio_tensor, sample_rate, file_path):
+    """오디오 텐서를 WAV 파일로 저장 (soundfile 사용)"""
+    # (채널 수, 샘플 수) 형태로 변환
+    audio_np = audio_tensor.squeeze().cpu().numpy()
+    sf.write(file_path, audio_np, sample_rate)
