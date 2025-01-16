@@ -591,7 +591,6 @@ class CAVMAE(nn.Module):
         v = self.norm_v(v)
         return a, v
 
-# the finetuned CAV-MAE model
 class CAVMAEFT(nn.Module):
     def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True,
@@ -619,24 +618,33 @@ class CAVMAEFT(nn.Module):
         self.blocks_v = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_u = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
         self.blocks_fu = nn.ModuleList([BlockWithImprovedCrossAttention(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
+        self.blocks_fu_pl = nn.ModuleList([
+            BlockWithAttentionPrompt(
+                dim=embed_dim,
+                num_heads=num_heads,
+                prompt_length=16,
+                mlp_ratio=mlp_ratio
+            ) for _ in range(modality_specific_depth)
+        ])
 
         self.norm_a = norm_layer(embed_dim)
         self.norm_v = norm_layer(embed_dim)
         self.norm = norm_layer(embed_dim)
 
         self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
+        self.mlp_head_prompt = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.additional_token = nn.Parameter(torch.randn(1, 16, embed_dim))
         
-        if prompt_inference:
-            # shape : (1, 1, hidden_dim)
-            complete_token = torch.load(f"{dir_path}/complete.pth").to(device)
-            audio_only_token = torch.load(f"{dir_path}/audio_only.pth").to(device)
-            vision_only_token = torch.load(f"{dir_path}/vision_only.pth").to(device)
-            noise_to_both_token = torch.load(f"{dir_path}/noise_to_both.pth").to(device)
-            # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-            self.additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
+        # if prompt_inference:
+        #     # shape : (1, 1, hidden_dim)
+        #     complete_token = torch.load(f"{dir_path}/complete.pth").to(device)
+        #     audio_only_token = torch.load(f"{dir_path}/audio_only.pth").to(device)
+        #     vision_only_token = torch.load(f"{dir_path}/vision_only.pth").to(device)
+        #     noise_to_both_token = torch.load(f"{dir_path}/noise_to_both.pth").to(device)
+        #     # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
+        #     self.additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
             
         self.initialize_weights()
 
@@ -690,13 +698,16 @@ class CAVMAEFT(nn.Module):
             for blk in self.blocks_v:
                 v = blk(v)
 
-            batch_size = a.size(0)
-            additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
+            # batch_size = a.size(0)
+            # additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
+            
+            ##Improved Cross Attention with Prompt
+            for blk in self.blocks_fu_pl:
+              a,v = blk(a,v)
 
-            a = torch.cat([additional_token_expanded, a], dim=1)
-            v = torch.cat([additional_token_expanded, v], dim=1)
 
             x = torch.cat((a, v), dim=1)
+            
             for blk in self.blocks_u:
                 x = blk(x)
             x = self.norm(x)
@@ -706,34 +717,35 @@ class CAVMAEFT(nn.Module):
 
             return x
         
-        elif mode == 'prompt_inference':
-            a = a.unsqueeze(1).transpose(2, 3)
-            a = self.patch_embed_a(a)
-            a = a + self.pos_embed_a + self.modality_a
-            for blk in self.blocks_a:
-                a = blk(a)
+        # elif mode == 'prompt_inference':
+        #     a = a.unsqueeze(1).transpose(2, 3)
+        #     a = self.patch_embed_a(a)
+        #     a = a + self.pos_embed_a + self.modality_a
+        #     for blk in self.blocks_a:
+        #         a = blk(a)
 
-            v = self.patch_embed_v(v)
-            v = v + self.pos_embed_v + self.modality_v
-            for blk in self.blocks_v:
-                v = blk(v)
+        #     v = self.patch_embed_v(v)
+        #     v = v + self.pos_embed_v + self.modality_v
+        #     for blk in self.blocks_v:
+        #         v = blk(v)
             
-            #additional token : [1, 4, 768]
-            #-> [B, 4, 768]
-            batch_size = a.size(0)
+        #     #additional token : [1, 4, 768]
+        #     #-> [B, 4, 768]
+        #     # batch_size = a.size(0)
 
-            additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
-            a = torch.cat([additional_token_expanded, a], dim=1)
-            v = torch.cat([additional_token_expanded, v], dim=1)
+        #     ##Improved Cross Attention with Prompt
+        #     for blk in self.blocks_fu_pl:
+        #       a,v = blk(a,v)        
             
-            x = torch.cat((a, v), dim=1)
-            for blk in self.blocks_u:
-                x = blk(x)
-            x = self.norm(x)
+        #     x = torch.cat((a, v), dim=1)
             
-            x = x.mean(dim=1)
-            x = self.mlp_head(x)
-            return x
+        #     for blk in self.blocks_u:
+        #         x = blk(x)
+        #     x = self.norm(x)
+            
+        #     x = x.mean(dim=1)
+        #     x = self.mlp_head_prompt(x)
+        #     return x
             
         # multi-modal fine-tuning, our default method for fine-tuning
         if mode == 'multimodal':
