@@ -23,7 +23,7 @@ import warnings
 import json
 from sklearn import metrics
 from traintest_pl import train_pl, validate_pl
-
+from traintest_ft import validate
 # finetune cav-mae model
 
 print("I am process %s, running on %s: starting (%s)" % (os.getpid(), os.uname()[1], time.asctime()))
@@ -82,6 +82,9 @@ parser.add_argument('--proportion', help='proportion of data to use for prompt l
 parser.add_argument('--save_data', help='save the data or not', type=ast.literal_eval)
 
 parser.add_argument('--mode', type=str, default='train', help='train or eval')
+
+parser.add_argument('--noise_to_audio', help='if add noise to audio', action='store_true')
+parser.add_argument('--noise_to_vision', help='if add noise to vision', action='store_true')
 
 args = parser.parse_args()
 
@@ -149,7 +152,7 @@ def train_run(mode):
 #     return sdA
 
 def eval_run():
-    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, dir_path=args.exp_dir)
     val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                     'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False}
     
@@ -169,13 +172,24 @@ def eval_run():
         audio_model = torch.nn.DataParallel(audio_model)
     audio_model = audio_model.to('cuda')
     audio_model.eval()
-    stats = validate_pl(audio_model, val_loader, args)
-    if args.metrics == 'mAP':
-        cur_res = np.mean([stat['AP'] for stat in stats])
-        print('mAP is {:.4f}'.format(cur_res))
-    elif args.metrics == 'acc':
-        cur_res = stats[0]['acc']
-        print('acc is {:.4f}'.format(cur_res))
+    stats, loss= validate_pl(audio_model, val_loader, args)
+    
+    AP_res = np.mean([stat['AP'] for stat in stats])
+    print("*** Prompt Learning ***")
+    print('mAP is {:.4f}'.format(AP_res))
+    acc_res = stats[0]['acc']
+    print('acc is {:.4f}'.format(acc_res))
+    print('loss is {:.4f}'.format(loss))
+    
+    stats, loss = validate(audio_model, val_loader, args)
+    
+    print("*** Fine-tuning ***")
+    AP_res = np.mean([stat['AP'] for stat in stats])
+    print('mAP is {:.4f}'.format(AP_res))
+    acc_res = stats[0]['acc']
+    print('acc is {:.4f}'.format(acc_res))
+    print('loss is {:.4f}'.format(loss))
+    
         
 if __name__ == '__main__':
     if args.exp_dir == '':
@@ -184,11 +198,6 @@ if __name__ == '__main__':
         os.makedirs(args.exp_dir)
         
     if args.mode == 'train':
-        print("\nCreating experiment directory: %s" % args.exp_dir)
-        try:
-            os.makedirs("%s/models" % args.exp_dir)
-        except:
-            pass
         with open("%s/args.pkl" % args.exp_dir, "wb") as f:
             pickle.dump(args, f)
         with open(args.exp_dir + '/args.json', 'w') as f:
