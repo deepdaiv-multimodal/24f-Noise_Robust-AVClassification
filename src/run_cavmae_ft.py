@@ -105,16 +105,16 @@ if args.bal == 'bal':
 else:
     print('balanced sampler is not used')
     train_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
+        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf,),
         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 val_loader = torch.utils.data.DataLoader(
-    dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
+    dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
     batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 if args.data_eval != None:
     eval_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=val_audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
+        dataloader.AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=val_audio_conf,),
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
 if args.model == 'cav-mae-ft':
@@ -170,7 +170,7 @@ if args.wa == True:
     sdA = wa_model(args.exp_dir, start_epoch=args.wa_start, end_epoch=args.wa_end)
     torch.save(sdA, args.exp_dir + "/models/audio_model_wa.pth")
 else:
-    # if no wa, use the best c ㅂheckpint
+    # if no wa, use the best checkpint
     sdA = torch.load(args.exp_dir + '/models/best_audio_model.pth', map_location='cpu')
 msg = audio_model.load_state_dict(sdA, strict=True)
 print(msg)
@@ -180,7 +180,7 @@ audio_model.eval()
 if args.skip_frame_agg == True:
     val_audio_conf['frame_use'] = 5
     val_loader = torch.utils.data.DataLoader(
-        dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
+        dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
     stats, audio_output, target = validate(audio_model, val_loader, args, output_pred=True)
     if args.metrics == 'mAP':
@@ -196,7 +196,7 @@ else:
     for frame in range(total_frames):
         val_audio_conf['frame_use'] = frame
         val_loader = torch.utils.data.DataLoader(
-            dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision),
+            dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf,),
             batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
         stats, audio_output, target = validate(audio_model, val_loader, args, output_pred=True)
         print(audio_output.shape)
