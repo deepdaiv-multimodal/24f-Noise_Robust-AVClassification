@@ -15,6 +15,85 @@ from timm.models.layers import to_2tuple, trunc_normal_, DropPath
 from timm.models.vision_transformer import Attention, Mlp, PatchEmbed, Block
 from .pos_embed import get_2d_sincos_pos_embed
 
+class BlockWithImprovedCrossAttention(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        # Self-Attention
+        self.norm1_a = norm_layer(dim)
+        self.norm1_v = norm_layer(dim)
+        self.self_attn_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.self_attn_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Cross Attention
+        self.cross_attn_a_to_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.cross_attn_v_to_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Modality Attention
+        self.modality_attention_a = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+        self.modality_attention_v = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+
+        # DropPath for regularization
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # Feed Forward Network (MLP)
+        self.norm2_a = norm_layer(dim)
+        self.norm2_v = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp_a = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp_v = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, a, v):
+        # Self-Attention
+        a_res = a
+        v_res = v
+        a, _ = self.self_attn_a(self.norm1_a(a), self.norm1_a(a), self.norm1_a(a))
+        v, _ = self.self_attn_v(self.norm1_v(v), self.norm1_v(v), self.norm1_v(v))
+        a = a_res + self.drop_path(a)
+        v = v_res + self.drop_path(v)
+
+        # Cross Attention
+        a_res = a
+        v_res = v
+
+        # Self-Attention 및 Cross-Attention에서 크기 조정
+        a_ = self.norm1_a(a).permute(1, 0, 2)  # [batch_size, seq_len, embed_dim] -> [seq_len, batch_size, embed_dim]
+        v_ = self.norm1_v(v).permute(1, 0, 2)  # [batch_size, seq_len, embed_dim] -> [seq_len, batch_size, embed_dim]
+
+
+        a, _ = self.cross_attn_a_to_v(a_, v_, v_)       
+        v, _ = self.cross_attn_v_to_a(v_, a_, a_)
+        
+        # 크기 복원
+        v = v.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim] -> [batch_size, seq_len, embed_dim]
+        a = a.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim] -> [batch_size, seq_len, embed_dim]
+        
+        a_cross = a_res + self.drop_path(a)
+        v_cross = v_res + self.drop_path(v)
+
+        # Modality Attention
+        # Modality Attention에 가중치 추가
+        alpha = 0.7  # 이미지 모달리티 강화 가중치
+        beta = 0.3   # 오디오 모달리티 가중치
+
+        a_fusion = a_cross + self.drop_path(self.modality_attention_a(a) * beta)
+        v_vfusion = v_cross + self.drop_path(self.modality_attention_v(v) * alpha) 
+
+        # Feed Forward Network (MLP)
+        a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a)))
+        v = v_res + self.drop_path(self.mlp_v(self.norm2_v(v)))
+
+        return a, v
+
+
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
@@ -481,6 +560,7 @@ class CAVMAEFT(nn.Module):
         self.blocks_a = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_v = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_u = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
+        self.blocks_fu = nn.ModuleList([BlockWithImprovedCrossAttention(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
 
         self.norm_a = norm_layer(embed_dim)
         self.norm_v = norm_layer(embed_dim)
@@ -545,6 +625,10 @@ class CAVMAEFT(nn.Module):
 
             for blk in self.blocks_v:
                 v = blk(v)
+
+            ##Improved Cross Attention
+            for blk in self.blocks_fu:
+                a,v = blk(a,v)
 
             x = torch.cat((a, v), dim=1)
 
