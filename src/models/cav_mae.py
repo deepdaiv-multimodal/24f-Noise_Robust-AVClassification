@@ -80,12 +80,8 @@ class BlockWithImprovedCrossAttention(nn.Module):
         v_cross = v_res + self.drop_path(v)
 
         # Modality Attention
-        # Modality Attention에 가중치 추가
-        alpha = 0.7  # 이미지 모달리티 강화 가중치
-        beta = 0.3   # 오디오 모달리티 가중치
-
-        a_fusion = a_cross + self.drop_path(self.modality_attention_a(a) * beta)
-        v_vfusion = v_cross + self.drop_path(self.modality_attention_v(v) * alpha) 
+        a_fusion = a_cross + self.drop_path(self.modality_attention_a(a))
+        v_vfusion = v_cross + self.drop_path(self.modality_attention_v(v)) 
 
         # Feed Forward Network (MLP)
         a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a)))
