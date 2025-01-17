@@ -35,9 +35,9 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
     if not noise_to_audio and not noise_to_vision:
         save_path = f"{args.exp_dir}/complete.pth"
     if noise_to_audio and not noise_to_vision:
-        save_path = f"{args.exp_dir}/audio_only.pth"
-    if not noise_to_audio and noise_to_vision:
         save_path = f"{args.exp_dir}/vision_only.pth"
+    if not noise_to_audio and noise_to_vision:
+        save_path = f"{args.exp_dir}/audio_only.pth"
     if noise_to_audio and noise_to_vision:
         save_path = f"{args.exp_dir}/noise_to_both.pth"
     
@@ -144,7 +144,25 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
             dnn_start_time = time.time()
 
             with autocast():
-                audio_output = audio_model(a_input, v_input, args.ftmode)
+                # if not noise_to_audio and not noise_to_vision:
+                # case = 1
+                # elif noise_to_audio and not noise_to_vision:
+                # case = 2
+                # elif not noise_to_audio and noise_to_vision:
+                # case = 3
+                # elif noise_to_audio and noise_to_vision:
+                # case = 4
+                
+                if not noise_to_audio and not noise_to_vision:
+                    case = 1
+                if noise_to_audio and not noise_to_vision:
+                    case = 2
+                if not noise_to_audio and noise_to_vision:
+                    case = 3
+                if noise_to_audio and noise_to_vision:
+                    case = 4
+                
+                audio_output = audio_model(a_input, v_input, args.ftmode, case)
                 loss = loss_fn(audio_output, labels)
 
             optimizer.zero_grad()
@@ -221,16 +239,8 @@ def validate_pl(audio_model, val_loader, args, output_pred=False):
             if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
                 a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
             
-            # shape : (1, 1, hidden_dim)
-            complete_token = torch.load(f"{args.exp_dir}/complete.pth").to(device)
-            audio_only_token = torch.load(f"{args.exp_dir}/audio_only.pth").to(device)
-            vision_only_token = torch.load(f"{args.exp_dir}/vision_only.pth").to(device)
-            noise_to_both_token = torch.load(f"{args.exp_dir}/noise_to_both.pth").to(device)
-            # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-            additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
-            
             with autocast():
-                audio_output_pl = audio_model(a_input, v_input, 'prompt_learning')
+                audio_output_pl = audio_model(a_input, v_input, 'prompt_inference')
                 # audio_output = audio_model(a_input, v_input, 'multimodal')
             # 결과 수집
             predictions_pl = audio_output_pl.to('cpu').detach()

@@ -152,7 +152,7 @@ def train_run(mode):
 #     return sdA
 
 def eval_run():
-    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, dir_path=args.exp_dir)
+    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, dir_path=args.exp_dir, prompt_inference=True)
     val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                     'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False}
     
@@ -162,6 +162,7 @@ def eval_run():
     if not isinstance(audio_model, torch.nn.DataParallel):
         audio_model = torch.nn.DataParallel(audio_model)
     miss, unexpected = audio_model.load_state_dict(mdl_weight, strict=False)
+    
     print('now load cav-mae fine-tuned weights from ', args.finetuned_path)
     print(miss, unexpected)
     
@@ -180,6 +181,17 @@ def eval_run():
     acc_res = stats[0]['acc']
     print('acc is {:.4f}'.format(acc_res))
     print('loss is {:.4f}'.format(loss))
+
+    
+    if args.finetuned_path == 'None':
+        raise ValueError('finetuned model path is not provided')
+    mdl_weight = torch.load(args.finetuned_path)
+    if not isinstance(audio_model, torch.nn.DataParallel):
+        audio_model = torch.nn.DataParallel(audio_model)
+        
+    miss, unexpected = audio_model.load_state_dict(mdl_weight, strict=False)
+    print('now load cav-mae fine-tuned weights from ', args.finetuned_path)
+    print(miss, unexpected)
     
     stats, loss = validate(audio_model, val_loader, args)
     

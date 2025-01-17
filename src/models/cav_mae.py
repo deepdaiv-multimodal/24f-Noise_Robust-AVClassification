@@ -459,7 +459,7 @@ class CAVMAE(nn.Module):
 class CAVMAEFT(nn.Module):
     def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True,
-                 prompt_inference=False, dir_path=None):
+                 prompt_length=16, prompt_inference=False, dir_path=None):
         super().__init__()
         timm.models.vision_transformer.Block = Block
         print('Use norm_pix_loss: ', norm_pix_loss)
@@ -490,16 +490,20 @@ class CAVMAEFT(nn.Module):
         self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.additional_token = nn.Parameter(torch.randn(1, 16, embed_dim))
         
         if prompt_inference:
             # shape : (1, 1, hidden_dim)
-            complete_token = torch.load(f"{dir_path}/complete.pth").to(device)
-            audio_only_token = torch.load(f"{dir_path}/audio_only.pth").to(device)
-            vision_only_token = torch.load(f"{dir_path}/vision_only.pth").to(device)
-            noise_to_both_token = torch.load(f"{dir_path}/noise_to_both.pth").to(device)
+            self.complete_token = torch.load(f"{dir_path}/complete.pth").to(device)
+            self.audio_only_token = torch.load(f"{dir_path}/audio_only.pth").to(device)
+            self.vision_only_token = torch.load(f"{dir_path}/vision_only.pth").to(device)
+            self.noise_to_both_token = torch.load(f"{dir_path}/noise_to_both.pth").to(device)
             # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-            self.additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
+            
+        else:
+            self.complete_token = nn.Parameter(torch.randn(1, prompt_length, embed_dim))
+            self.audio_only_token = nn.Parameter(torch.randn(1, prompt_length, embed_dim))
+            self.vision_only_token = nn.Parameter(torch.randn(1, prompt_length, embed_dim))
+            self.noise_to_both_token = nn.Parameter(torch.randn(1, prompt_length, embed_dim))
             
         self.initialize_weights()
 
@@ -540,7 +544,7 @@ class CAVMAEFT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, a, v, mode, additional_token=None):
+    def forward(self, a, v, mode, case=None):
         if mode == 'prompt_learning':
             a = a.unsqueeze(1).transpose(2, 3)
             a = self.patch_embed_a(a)
@@ -553,15 +557,18 @@ class CAVMAEFT(nn.Module):
             for blk in self.blocks_v:
                 v = blk(v)
 
+            prompt_dict = {1: self.complete_token, 2: self.vision_only_token, 3: self.audio_only_token, 4: self.noise_to_both_token}
+            additional_token = prompt_dict[case]
+            
             batch_size = a.size(0)
-            additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
+            additional_token_expanded = additional_token.expand(batch_size, -1, -1)
 
             a = torch.cat([additional_token_expanded, a], dim=1)
             v = torch.cat([additional_token_expanded, v], dim=1)
 
             x = torch.cat((a, v), dim=1)
             for blk in self.blocks_u:
-                x = blk(x)
+                x = blk(x, )
             x = self.norm(x)
 
             x = x.mean(dim=1)
@@ -584,8 +591,12 @@ class CAVMAEFT(nn.Module):
             #additional token : [1, 4, 768]
             #-> [B, 4, 768]
             batch_size = a.size(0)
-
-            additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
+            additional_token = torch.cat([self.complete_token, self.vision_only_token, self.audio_only_token, self.noise_to_both_token], dim=1)
+            # additional_token = self.noise_to_both_token
+            additional_token_expanded = additional_token.expand(batch_size, -1, -1)
+            device = a.device
+            
+            additional_token_expanded = additional_token_expanded.to(device)
             a = torch.cat([additional_token_expanded, a], dim=1)
             v = torch.cat([additional_token_expanded, v], dim=1)
             
@@ -597,8 +608,46 @@ class CAVMAEFT(nn.Module):
             x = x.mean(dim=1)
             x = self.mlp_head(x)
             return x
+        
+        if mode == 'prompt_learning_with_input':
+            a = a.unsqueeze(1).transpose(2, 3)
+            a = self.patch_embed_a(a)
+            a = a + self.pos_embed_a + self.modality_a
+            for blk in self.blocks_a:
+                a = blk(a)
+
+            v = self.patch_embed_v(v)
+            v = v + self.pos_embed_v + self.modality_v
+            for blk in self.blocks_v:
+                v = blk(v)
             
-        # multi-modal fine-tuning, our default method for fine-tuning
+            prompts = self.additional_token
+            
+            # additional_token : [num_layers, 16, 768]
+            for i, blk in enumerate(self.transformer.blocks):
+                if i in self.prompt_layers:
+                    if self.multi_layer_prompt:
+                        x = blk(x, prompts=prompts[:,self.prompt_layers.index(i)], 
+                                    learnt_p=self.learnt_p,
+                                    prompt_type=self.prompt_type)
+                    else:
+                        x = blk(x, prompts=prompts, learnt_p=self.learnt_p)
+                else:
+                    x = blk(x)
+        
+            if self.prompt_type == 'input':
+                total_prompt_len = len(self.prompt_layers)* prompts.shape[-2]
+            elif self.prompt_type == 'attention':
+                total_prompt_len = prompts.shape[-2]
+        
+            x = x[:,total_prompt_len : ]
+            
+            x = self.norm(x)
+            x = x.mean(dim=1) 
+            x = self.mlp_head(x)
+            
+            return x
+            
         if mode == 'multimodal':
             a = a.unsqueeze(1)
             a = a.transpose(2, 3)
