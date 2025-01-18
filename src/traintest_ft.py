@@ -149,23 +149,22 @@ def train(audio_model, train_loader, test_loader, args):
 
         print('start validation')
 
-        stats, valid_loss = validate(audio_model, test_loader, args)
+        stats_complete, valid_loss_complete = validate(audio_model, test_loader, args, noise_to_audio=False, noise_to_vision=False)
+        stats_audio, valid_loss_audio = validate(audio_model, test_loader, args, noise_to_audio=True, noise_to_vision=False)
+        stats_vision, valid_loss_vision = validate(audio_model, test_loader, args, noise_to_audio=False, noise_to_vision=True)
+        stats_audio_vision, valid_loss_audio_vision = validate(audio_model, test_loader, args, noise_to_audio=True, noise_to_vision=True)
 
-        mAP = np.mean([stat['AP'] for stat in stats])
-        mAUC = np.mean([stat['auc'] for stat in stats])
-        acc = stats[0]['acc'] # this is just a trick, acc of each class entry is the same, which is the accuracy of all classes, not class-wise accuracy
+        mAP = np.mean([stat['AP'] for stat in stats_complete])
+        mAUC = np.mean([stat['auc'] for stat in stats_complete])
+        acc = stats_complete[0]['acc'] # this is just a trick, acc of each class entry is the same, which is the accuracy of all classes, not class-wise accuracy
 
-        if main_metrics == 'mAP':
-            print("mAP: {:.6f}".format(mAP))
-        else:
-            print("acc: {:.6f}".format(acc))
-        print("AUC: {:.6f}".format(mAUC))
-        print("d_prime: {:.6f}".format(d_prime(mAUC)))
-        print("train_loss: {:.6f}".format(loss_meter.avg))
-        print("valid_loss: {:.6f}".format(valid_loss))
+        stats_list = [stats_complete, stats_audio, stats_vision, stats_audio_vision]
+        valid_loss_list = [valid_loss_complete, valid_loss_audio, valid_loss_vision, valid_loss_audio_vision]
+        config_names = ["No Noise", "Audio Noise Only", "Vision Noise Only", "Audio + Vision"]
 
-        result[epoch-1, :] = [acc, mAP, mAUC, optimizer.param_groups[0]['lr']]
-        np.savetxt(exp_dir + '/result.csv', result, delimiter=',')
+        # 결과 출력
+        print_validation_results(stats_list, valid_loss_list, config_names)
+
         print('validation finished')
 
         if mAP > best_mAP:
@@ -194,8 +193,6 @@ def train(audio_model, train_loader, test_loader, args):
 
         print('Epoch-{0} lr: {1}'.format(epoch, optimizer.param_groups[0]['lr']))
 
-        with open(exp_dir + '/stats_' + str(epoch) +'.pickle', 'wb') as handle:
-            pickle.dump(stats, handle, protocol=pickle.HIGHEST_PROTOCOL)
         _save_progress()
 
         finish_time = time.time()
@@ -210,7 +207,7 @@ def train(audio_model, train_loader, test_loader, args):
         loss_meter.reset()
         per_sample_dnn_time.reset()
 
-def validate(audio_model, val_loader, args, output_pred=False):
+def validate(audio_model, val_loader, args, noise_to_audio=False, noise_to_vision=False, output_pred=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_time = AverageMeter()
     if not isinstance(audio_model, nn.DataParallel):
@@ -223,8 +220,8 @@ def validate(audio_model, val_loader, args, output_pred=False):
     
     # 노이즈 주입 활성화 여부를 args로 설정
     noise_params = {
-        "noise_to_audio": args.noise_to_audio if hasattr(args, "noise_to_audio") else False,
-        "noise_to_vision": args.noise_to_vision if hasattr(args, "noise_to_vision") else False,
+        "noise_to_audio": noise_to_audio,
+        "noise_to_vision": noise_to_vision,
     }
     
     with torch.no_grad():
@@ -277,3 +274,21 @@ def save_images(batch_image, output_dir="output_images"):
     for i in range(batch_image.size(0)):
         image = batch_image[i].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C)
         plt.imsave(os.path.join(output_dir, f"image_{i}.png"), image)
+        
+def print_validation_results(stats_list, valid_loss_list, config_names):
+    print("===================== Validation Results =====================")
+    print("\nConfiguration       |  Accuracy  |    mAP    |    AUC    |  d-prime  |  Valid Loss")
+    print("---------------------------------------------------------------------------------")
+    
+    for stats, valid_loss, config in zip(stats_list, valid_loss_list, config_names):
+        mAP = np.mean([stat['AP'] for stat in stats])
+        mAUC = np.mean([stat['auc'] for stat in stats])
+        acc = stats[0]['acc']  # 전체 정확도
+        d_prime_value = d_prime(mAUC)
+        
+        print("{:<18} |  {:.6f}  |  {:.6f} |  {:.6f} |  {:.4f}  |  {:.6f}".format(
+            config, acc, mAP, mAUC, d_prime_value, valid_loss
+        ))
+    
+    print("==============================================================")
+    print("\nValidation Completed!")

@@ -309,15 +309,14 @@ def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
 
     # 오디오 노이즈
     if noise_params.get("noise_to_audio", False):
-        audio_noise_types = ['gaussian', 'shift', 'time_mask'] if both_noise else ['gaussian', 'shift', 'time_mask']
+        audio_noise_types = ['gaussian', 'shift', 'time_mask'] if both_noise else ['none', 'gaussian', 'shift', 'time_mask']
         for i in range(batch_fbank.size(0)):
             noise_type = random.choice(audio_noise_types)
-
-            if noise_type == 'gaussian':
+            if noise_type == 'none':
+                # zero noise
+                batch_fbank[i, :, :] = torch.zeros_like(batch_fbank[i, :, :])
+            elif noise_type == 'gaussian':
                 batch_fbank[i, :, :] += torch.normal(mean=0.0, std=audio_gaussian_std, size=batch_fbank[i, :, :].size(), device=batch_fbank.device)
-            elif noise_type == 'shift':
-                shift_value = np.random.randint(-batch_fbank.size(2) // 2, batch_fbank.size(2) // 2)
-                batch_fbank[i, :, :] = torch.roll(batch_fbank[i, :, :], shifts=shift_value, dims=1)
             elif noise_type == 'time_mask':
                 # SpecAugment에서 사용하는 시간 마스킹 기법
                 time_mask_size = np.random.randint(0, batch_fbank.size(2) // 4)
@@ -326,13 +325,12 @@ def apply_noise_to_batch(batch_fbank, batch_image, noise_params):
 
     # 비주얼 노이즈
     if noise_params.get("noise_to_vision", False):
-        vision_noise_types = ['gaussian', 'blur', 'pixelate'] if both_noise else ['gaussian', 'blur', 'pixelate']
+        vision_noise_types = ['gaussian', 'blur', 'pixelate'] if both_noise else ['none', 'gaussian', 'blur', 'pixelate']
         for i in range(batch_image.size(0)):
-            noise_type = 'none' #random.choice(vision_noise_types)
+            noise_type = random.choice(vision_noise_types)
             if noise_type == 'none':
                 # black image.
                 batch_image[i] = torch.zeros_like(batch_image[i])
-
             elif noise_type == 'gaussian':
                 batch_image[i] += torch.normal(mean=0.0, std=vision_gaussian_std, size=batch_image[i].size(), device=batch_image.device)
                 batch_image[i] = torch.clamp(batch_image[i], -3, 3)

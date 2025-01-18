@@ -14,6 +14,7 @@ import sys
 import time
 import torch
 from torch.utils.data import WeightedRandomSampler
+from torch.utils.data.distributed import DistributedSampler
 basepath = os.path.dirname(os.path.dirname(sys.path[0]))
 sys.path.append(basepath)
 import dataloader as dataloader
@@ -25,6 +26,7 @@ from sklearn import metrics
 from traintest_pl import train_pl, validate_pl
 from traintest_ft import validate
 # finetune cav-mae model
+from typing import Any, Dict
 
 print("I am process %s, running on %s: starting (%s)" % (os.getpid(), os.uname()[1], time.asctime()))
 
@@ -88,11 +90,23 @@ parser.add_argument('--noise_to_vision', help='if add noise to vision', action='
 
 args = parser.parse_args()
 
+# Config 로드 함수
+def load_config(file_path: str) -> Dict[str, Any]:
+    with open(file_path, 'r') as f:
+        return json.load(f)
+
+# 기본 Config 설정
+def default_config() -> Dict[str, Any]:
+    return {
+        "prompt_type": "input",
+        "prompt_layers": [1, 2, 3],
+        "multi_layer_prompt": True,
+        "prompt_length": 16,
+        "learnt_p": False
+    }
+
 def train_run(mode):
-    # mode 0: complete
-    # mode 1: vision only
-    # mode 2: audio only
-    # mode 3: noise to both
+
     
     # all exp in this work is based on 224 * 224 image
     im_res = 224
@@ -100,12 +114,34 @@ def train_run(mode):
                 'dataset': args.dataset, 'mode':'train', 'mean':args.dataset_mean, 'std':args.dataset_std,
                 'noise':args.noise, 'label_smooth': args.label_smooth, 'im_res': im_res}
     
+    config = default_config()
+    
+    train_sampler = DistributedSampler(
+        dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf),
+    )
+    shuffle = False
+    
     train_loader = torch.utils.data.DataLoader(
             dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf),
-            batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+            batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True,
+            sampler=train_sampler)
 
     if args.model == 'cav-mae-ft':
-        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+        audio_model = models.CAVMAEFT(
+            label_dim=args.n_class,
+            modality_specific_depth=11,
+            prompt_type=config["prompt_type"],
+            prompt_layers=config["prompt_layers"],
+            multi_layer_prompt=config["multi_layer_prompt"],
+            prompt_length=config["prompt_length"],
+            learnt_p=config["learnt_p"],
+            train_mode=mode,
+        )
+        # mode 0: complete
+        # mode 1: vision only
+        # mode 2: audio only
+        # mode 3: noise to both
+        
     else:
         raise ValueError('model not supported')
 

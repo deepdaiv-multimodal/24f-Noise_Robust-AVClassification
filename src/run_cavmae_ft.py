@@ -78,8 +78,7 @@ parser.add_argument("--head_lr", type=float, default=50.0, help="learning rate r
 parser.add_argument('--freeze_base', help='freeze the backbone or not', type=ast.literal_eval)
 parser.add_argument('--skip_frame_agg', help='if do frame agg', type=ast.literal_eval)
 
-parser.add_argument('--noise_to_audio', help='if add noise to audio', action='store_true')
-parser.add_argument('--noise_to_vision', help='if add noise to image', action='store_true')
+parser.add_argument('--add_fusion_module', help='if add fusion module', action='store_true')
 
 args = parser.parse_args()
 
@@ -119,9 +118,9 @@ if args.data_eval != None:
 
 if args.model == 'cav-mae-ft':
     print('finetune a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, fusion_depth=3, with_fusion=args.add_fusion_module)
 else:
-    raise ValueError('model not supported')
+    raise ValueError(f'{args.model} not supported')
 
 if args.pretrain_path == 'None':
     warnings.warn("Note you are finetuning a model without any finetuning.")

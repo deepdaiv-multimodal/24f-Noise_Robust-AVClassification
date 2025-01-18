@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import timm
 from timm.models.layers import to_2tuple, trunc_normal_, DropPath
-from timm.models.vision_transformer import Attention, Mlp, PatchEmbed, Block
+from timm.models.vision_transformer import Mlp, PatchEmbed, Attention
 from .pos_embed import get_2d_sincos_pos_embed
 
 class BlockWithAttentionPrompt(nn.Module):
@@ -142,11 +142,11 @@ class BlockWithImprovedCrossAttention(nn.Module):
 
         # Modality Attention
         a_fusion = a_cross + self.drop_path(self.modality_attention_a(a))
-        v_vfusion = v_cross + self.drop_path(self.modality_attention_v(v)) 
+        v_fusion = v_cross + self.drop_path(self.modality_attention_v(v)) 
 
         # Feed Forward Network (MLP)
-        a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a)))
-        v = v_res + self.drop_path(self.mlp_v(self.norm2_v(v)))
+        a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a_fusion)))
+        v = v_res + self.drop_path(self.mlp_v(self.norm2_v(v_fusion)))
 
         return a, v
 
@@ -168,6 +168,66 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
+class AttentionWithPrompt(Attention):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=False,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+    ):
+        super().__init__(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=proj_drop)
+
+    def forward(self, x, mode=None, prompts=None, learnt_p=False, prompt_type='input'):
+        B, N, C = x.shape
+        if prompts is None or prompt_type == 'input':
+            # origin attention
+            qkv = (
+                self.qkv(x)
+                .reshape(B, N, 3, self.num_heads, C // self.num_heads)
+                .permute(2, 0, 3, 1, 4)
+            )
+            q, k, v = (
+                qkv[0],
+                qkv[1],
+                qkv[2],
+            )  # make torchscript happy (cannot use tensor as tuple)
+
+        elif prompt_type == 'attention':
+            # prefix prompt tuning
+            P = prompts.size(1)
+            qkv = (
+                self.qkv(x)
+                .reshape(B, N, 3, C)
+            )   
+            
+            if learnt_p:
+                P = P//2
+                prompts_k = prompts[:,:P]
+                prompts_v = prompts[:,P:]
+            else:
+                prompts_k = prompts
+                prompts_v = prompts
+
+            q, k, v = (
+                qkv[:,:,0,:].reshape(B,N,12,C//12).permute(0,2,1,3),
+                torch.cat([prompts_k,qkv[:,:,1,:]], dim=1).reshape(B,N+P,12,C//12).permute(0,2,1,3),
+                torch.cat([prompts_v,qkv[:,:,2,:]], dim=1).reshape(B,N+P,12,C//12).permute(0,2,1,3),
+            )  
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        
+        return x
+
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
@@ -177,6 +237,8 @@ class Block(nn.Module):
         self.norm1_v = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.attn_with_prompt = AttentionWithPrompt(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -185,10 +247,23 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, modality=None):
+    def forward(self, x, mode=None, modality=None,
+                prompts=None, learnt_p=False, prompt_type='input'):
         if modality == None:
-            x = x + self.drop_path(self.attn(self.norm1(x)))
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            if mode == 'multimodal':
+                x = x + self.drop_path(self.attn(self.norm1(x)))
+                x = x + self.drop_path(self.mlp(self.norm2(x)))
+                
+            elif mode == 'prompt_learning':
+                if prompts is not None and prompt_type == 'input':
+                    x = torch.cat([prompts, x], dim=1)
+                
+                _x = self.attn(self.norm1(x), prompts=prompts, learnt_p=learnt_p, prompt_type=prompt_type)
+                x = x + self.drop_path(_x)
+                x = x + self.drop_path(self.mlp(self.norm2(x)))
+            else:
+                raise ValueError(f'mode {mode} not supported')
+            
         elif modality == 'a':
             x = x + self.drop_path(self.attn(self.norm1_a(x)))
             x = x + self.drop_path(self.mlp(self.norm2_a(x)))
@@ -241,7 +316,7 @@ class CAVMAE(nn.Module):
         # Project to lower dimension for the decoder
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
-        # token used for masking
+        # token used forng
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         self.decoder_modality_a = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
@@ -594,13 +669,13 @@ class CAVMAE(nn.Module):
 class CAVMAEFT(nn.Module):
     def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True,
-                 prompt_inference=False, dir_path=None):
+                 prompt_type='input', prompt_layers=[1,2,3], multi_layer_prompt=True, prompt_length=16,
+                 learnt_p=False, train_mode=0, with_fusion=True, fusion_depth=3):
+        
         super().__init__()
-        timm.models.vision_transformer.Block = Block
         print('Use norm_pix_loss: ', norm_pix_loss)
 
         timm.models.vision_transformer.PatchEmbed = PatchEmbed
-        timm.models.vision_transformer.Block = Block
 
         self.patch_embed_a = PatchEmbed(img_size, patch_size, 1, embed_dim)
         self.patch_embed_v = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -617,40 +692,76 @@ class CAVMAEFT(nn.Module):
         self.blocks_a = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_v = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_u = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
-        self.blocks_fu = nn.ModuleList([BlockWithImprovedCrossAttention(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(12 - modality_specific_depth)])
-        self.blocks_fu_pl = nn.ModuleList([
-            BlockWithAttentionPrompt(
-                dim=embed_dim,
-                num_heads=num_heads,
-                prompt_length=16,
-                mlp_ratio=mlp_ratio
-            ) for _ in range(modality_specific_depth)
-        ])
+        self.with_fusion = with_fusion
+        if with_fusion:
+            self.blocks_fu = nn.ModuleList([BlockWithImprovedCrossAttention(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(fusion_depth)])
+        # self.blocks_fu_pl = nn.ModuleList([
+        #     BlockWithAttentionPrompt(
+        #         dim=embed_dim,
+        #         num_heads=num_heads,
+        #         prompt_length=16,
+        #         mlp_ratio=mlp_ratio
+        #     ) for _ in range(modality_specific_depth)
+        # ])
 
         self.norm_a = norm_layer(embed_dim)
         self.norm_v = norm_layer(embed_dim)
         self.norm = norm_layer(embed_dim)
-
-        self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
-        self.mlp_head_prompt = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.additional_token = nn.Parameter(torch.randn(1, 16, embed_dim))
         
-        # if prompt_inference:
-        #     # shape : (1, 1, hidden_dim)
-        #     complete_token = torch.load(f"{dir_path}/complete.pth").to(device)
-        #     audio_only_token = torch.load(f"{dir_path}/audio_only.pth").to(device)
-        #     vision_only_token = torch.load(f"{dir_path}/vision_only.pth").to(device)
-        #     noise_to_both_token = torch.load(f"{dir_path}/noise_to_both.pth").to(device)
-        #     # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-        #     self.additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
-            
+        self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, label_dim))
+
+        self.prompt_type = prompt_type
+        self.prompt_layers = prompt_layers
+        self.multi_layer_prompt = multi_layer_prompt
+        self.prompt_length = prompt_length
+        self.learnt_p = learnt_p
+        
+        prompt_num = len(prompt_layers) if multi_layer_prompt else 1
+        
+        complete_prompt = torch.zeros(prompt_num, prompt_length, embed_dim)
+        complete_prompt[:,0:1,:].fill_(1)            
+        if self.learnt_p and self.prompt_type == 'attention':
+            complete_prompt[:,prompt_length//2:prompt_length//2+1,:].fill_(1)
+        self.complete_prompt = nn.Parameter(complete_prompt)
+
+        missing_audio_prompt = torch.zeros(prompt_num, prompt_length, embed_dim)
+        missing_audio_prompt[:,2:3,:].fill_(1)            
+        if self.learnt_p and self.prompt_type == 'attention':
+            missing_audio_prompt[:,prompt_length//2+2:prompt_length//2+3,:].fill_(1)
+        self.missing_audio_prompt = nn.Parameter(missing_audio_prompt)
+
+        missing_img_prompt = torch.zeros(prompt_num, prompt_length, embed_dim)
+        missing_img_prompt[:,1:2,:].fill_(1)            
+        if self.learnt_p and self.prompt_type == 'attention':
+            missing_img_prompt[:,prompt_length//2+1:prompt_length//2+2,:].fill_(1)
+        self.missing_img_prompt = nn.Parameter(missing_img_prompt)
+
+        noise_to_both_prompt = torch.zeros(prompt_num, prompt_length, embed_dim)
+        noise_to_both_prompt[:,3:4,:].fill_(1)
+        if self.learnt_p and self.prompt_type == 'attention':
+            noise_to_both_prompt[:,prompt_length//2+3:prompt_length//2+4,:].fill_(1)
+        self.noise_to_both_prompt = nn.Parameter(noise_to_both_prompt)
+        
+        if not self.learnt_p:
+            self.complete_prompt.requires_grad=False
+            self.missing_audio_prompt.requires_grad=False           
+            self.missing_img_prompt.requires_grad=False
+            self.noise_to_both_prompt.requires_grad=False
+        
+        if train_mode == 0:
+            self.additional_token = self.complete_prompt
+        elif train_mode == 1:
+            self.additional_token = self.missing_audio_prompt
+        elif train_mode == 2:
+            self.additional_token = self.missing_img_prompt
+        elif train_mode == 3:
+            self.additional_token = self.noise_to_both_prompt
+        
         self.initialize_weights()
 
         print('Audio Positional Embedding Shape:', self.pos_embed_a.shape)
         print('Visual Positional Embedding Shape:', self.pos_embed_v.shape)
-
+    
     def get_patch_num(self, input_shape, stride):
         test_input = torch.zeros(1, 1, input_shape[0], input_shape[1])
         test_proj = torch.nn.Conv2d(1, 4, kernel_size=(16, 16), stride=(stride, stride))
@@ -685,68 +796,54 @@ class CAVMAEFT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, a, v, mode, additional_token=None):
+    def forward(self, a, v, mode):
         if mode == 'prompt_learning':
             a = a.unsqueeze(1).transpose(2, 3)
             a = self.patch_embed_a(a)
             a = a + self.pos_embed_a + self.modality_a
             for blk in self.blocks_a:
-                a = blk(a)
+                a = blk(a, mode=mode)
 
             v = self.patch_embed_v(v)
             v = v + self.pos_embed_v + self.modality_v
             for blk in self.blocks_v:
-                v = blk(v)
+                v = blk(v, mode=mode)
 
             # batch_size = a.size(0)
             # additional_token_expanded = self.additional_token.expand(batch_size, -1, -1)
             
             ##Improved Cross Attention with Prompt
-            for blk in self.blocks_fu_pl:
-              a,v = blk(a,v)
+            for blk in self.blocks_fu:
+                a, v = blk(a,v)
 
 
             x = torch.cat((a, v), dim=1)
             
-            for blk in self.blocks_u:
-                x = blk(x)
+            if self.learnt_p:
+                #TODO: 인퍼런스 코드 작성 필요ㅇㄴㅁㄹㅇㅁㄹㄴㅁㅇㄴㄹㅇㅁㄹㄴㅇㄹㅁㅇㄹㄴ
+                pass
+            
+            #TODO: 차원 맞추기
+            prompts = self.additional_token.unsqueeze(0).expand(x.size(0), -1, -1)
+            
+            for i, blk in enumerate(self.blocks_u):
+                if i in self.prompt_layers:
+                    if self.multi_layer_prompt:
+                        x = blk(x, mode=mode, prompts=prompts[:,self.prompt_layers.index(i)],  
+                                learnt_p=self.learnt_p,
+                                prompt_type=self.prompt_type)
+                    else:
+                        x = blk(x, mode=mode, prompts=prompts, learnt_p=self.learnt_p)
+                else:
+                    x = blk(x, mode=mode)
+                    
             x = self.norm(x)
 
             x = x.mean(dim=1)
             x = self.mlp_head(x)
 
             return x
-        
-        # elif mode == 'prompt_inference':
-        #     a = a.unsqueeze(1).transpose(2, 3)
-        #     a = self.patch_embed_a(a)
-        #     a = a + self.pos_embed_a + self.modality_a
-        #     for blk in self.blocks_a:
-        #         a = blk(a)
 
-        #     v = self.patch_embed_v(v)
-        #     v = v + self.pos_embed_v + self.modality_v
-        #     for blk in self.blocks_v:
-        #         v = blk(v)
-            
-        #     #additional token : [1, 4, 768]
-        #     #-> [B, 4, 768]
-        #     # batch_size = a.size(0)
-
-        #     ##Improved Cross Attention with Prompt
-        #     for blk in self.blocks_fu_pl:
-        #       a,v = blk(a,v)        
-            
-        #     x = torch.cat((a, v), dim=1)
-            
-        #     for blk in self.blocks_u:
-        #         x = blk(x)
-        #     x = self.norm(x)
-            
-        #     x = x.mean(dim=1)
-        #     x = self.mlp_head_prompt(x)
-        #     return x
-            
         # multi-modal fine-tuning, our default method for fine-tuning
         if mode == 'multimodal':
             a = a.unsqueeze(1)

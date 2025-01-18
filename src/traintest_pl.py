@@ -176,12 +176,12 @@ def train_pl(audio_model, train_loader, args, noise_to_audio=False, noise_to_vis
             if np.isnan(loss_meter.avg):
                 print("Training diverged due to NaN loss. Stopping training...")
                 exit()
-
+        
             # Best 모델 저장
             if loss_meter.avg < best_loss:
+                additional_token = audio_model.module.additional_token
                 best_loss = loss_meter.avg
-                torch.save(audio_model.state_dict(), save_path)
-                print(f"Best model saved at {save_path} with loss: {best_loss:.4f}")
+                torch.save(additional_token, save_path)
 
 
             end_time = time.time()
@@ -228,18 +228,9 @@ def validate_pl(audio_model, val_loader, args, output_pred=False):
             
             if noise_params["noise_to_audio"] or noise_params["noise_to_vision"]:
               a_input, v_input = apply_noise_to_batch(a_input, v_input, noise_params)
-            
-            # shape : (1, 1, hidden_dim)
-            # complete_token = torch.load(f"{args.exp_dir}/complete.pth").to(device)
-            #audio_only_token = torch.load(f"{args.exp_dir}/audio_only.pth").to(device)
-            # vision_only_token = torch.load(f"{args.exp_dir}/vision_only.pth").to(device)
-            # noise_to_both_token = torch.load(f"{args.exp_dir}/noise_to_both.pth").to(device)
-            # (1, 1, hidden_dim) * 4 -> (1, 4, hidden_dim)
-            #additional_token = torch.cat([complete_token, audio_only_token, vision_only_token, noise_to_both_token], dim=1)
-            #additional_token = torch.cat([noise_to_both_token], dim=1)
 
             with autocast():
-                audio_output_pl = audio_model(a_input, v_input, 'prompt_learning')
+                audio_output_pl = audio_model(a_input, v_input, 'prompt_inference')
                 # audio_output = audio_model(a_input, v_input, 'multimodal')
             # 결과 수집
             predictions_pl = audio_output_pl.to('cpu').detach()
