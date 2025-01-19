@@ -224,7 +224,6 @@ def validate_pl(audio_model, val_loader, args, output_pred=False):
 
     end = time.time()
     A_predictions_pl, A_targets_pl, A_loss_pl = [], [], []
-    A_preditions, A_targets, A_loss = [], [], []
     
     noise_params = {
         "noise_to_audio": args.noise_to_audio if hasattr(args, "noise_to_audio") else False,
@@ -241,7 +240,7 @@ def validate_pl(audio_model, val_loader, args, output_pred=False):
             
             with autocast():
                 audio_output_pl = audio_model(a_input, v_input, 'prompt_inference')
-                # audio_output = audio_model(a_input, v_input, 'multimodal')
+                
             # 결과 수집
             predictions_pl = audio_output_pl.to('cpu').detach()
             A_predictions_pl.append(predictions_pl)

@@ -10,6 +10,8 @@ os.environ['TORCH_HOME'] = './pretrained_models'
 import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 import timm
 from timm.models.layers import to_2tuple, trunc_normal_, DropPath
 from timm.models.vision_transformer import Attention, Mlp, PatchEmbed, Block
@@ -66,6 +68,221 @@ class Block(nn.Module):
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             
         return x
+
+class BlockforFusion(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        # Self-Attention
+        self.norm1_a = norm_layer(dim)
+        self.norm1_v = norm_layer(dim)
+        self.self_attn_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.self_attn_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Cross Attention
+        self.cross_attn_a_to_v = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+        self.cross_attn_v_to_a = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop)
+
+        # Modality Attention
+        self.modality_attention_a = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+        self.modality_attention_v = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+
+        # DropPath for regularization
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # Feed Forward Network (MLP)
+        self.norm2_a = norm_layer(dim)
+        self.norm2_v = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp_a = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp_v = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, a, v):
+        # Self-Attention
+        a_res = a
+        v_res = v
+        a, _ = self.self_attn_a(self.norm1_a(a), self.norm1_a(a), self.norm1_a(a))
+        v, _ = self.self_attn_v(self.norm1_v(v), self.norm1_v(v), self.norm1_v(v))
+        a = a_res + self.drop_path(a)
+        v = v_res + self.drop_path(v)
+
+        # Cross Attention
+        a_res = a
+        v_res = v
+
+        # Self-Attention 및 Cross-Attention에서 크기 조정
+        a_ = self.norm1_a(a).permute(1, 0, 2)  # [batch_size, seq_len, embed_dim] -> [seq_len, batch_size, embed_dim]
+        v_ = self.norm1_v(v).permute(1, 0, 2)  # [batch_size, seq_len, embed_dim] -> [seq_len, batch_size, embed_dim]
+
+
+        a, _ = self.cross_attn_a_to_v(a_, v_, v_)       
+        v, _ = self.cross_attn_v_to_a(v_, a_, a_)
+        
+        # 크기 복원
+        v = v.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim] -> [batch_size, seq_len, embed_dim]
+        a = a.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim] -> [batch_size, seq_len, embed_dim]
+        
+        a = a_res + self.drop_path(a)
+        v = v_res + self.drop_path(v)
+
+        # # Modality Attention
+        # a_fusion = a_cross + self.drop_path(self.modality_attention_a(a))
+        # v_fusion = v_cross + self.drop_path(self.modality_attention_v(v)) 
+
+        # # Feed Forward Network (MLP)
+        # a = a_res + self.drop_path(self.mlp_a(self.norm2_a(a_fusion)))
+        # v = v_res + self.drop_path(self.mlp_v(self.norm2_v(v_fusion)))
+
+        return a, v
+
+import torch
+import torch.nn as nn
+from timm.models.vision_transformer import Attention, Mlp
+
+class CrossAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, qkv_bias=True, attn_drop=0.0, proj_drop=0.0):
+        """
+        Multi-Head Attention Module.
+
+        Args:
+            embed_dim (int): Dimension of embeddings.
+            num_heads (int): Number of attention heads.
+            qkv_bias (bool): Whether to include bias in Q, K, V projections.
+            attn_drop (float): Dropout rate for attention scores.
+            proj_drop (float): Dropout rate for output projection.
+        """
+        super(CrossAttention, self).__init__()
+        assert embed_dim % num_heads == 0, "Embedding dimension must be divisible by number of heads."
+        
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        # Q, K, V projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
+
+        # Output projection
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, kv=None):
+        """
+        Forward pass for Multi-Head Attention.
+
+        Args:
+            x (torch.Tensor): Query tensor [batch_size, seq_len, embed_dim].
+            kv (torch.Tensor): Key-Value tensor [batch_size, seq_len, embed_dim].
+                               If None, self-attention is performed.
+
+        Returns:
+            torch.Tensor: Output tensor [batch_size, seq_len, embed_dim].
+            torch.Tensor: Attention weights [batch_size, num_heads, seq_len, seq_len].
+        """
+        B, N, C = x.shape  # Batch size, Sequence length, Embedding dimension
+        kv = x if kv is None else kv  # Self-attention if kv is None
+        
+        # Linear projections
+        q = self.q_proj(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, num_heads, N, head_dim]
+        k = self.k_proj(kv).reshape(B, -1, self.num_heads, self.head_dim).permute(0, 2, 3, 1)  # [B, num_heads, head_dim, seq_len]
+        v = self.v_proj(kv).reshape(B, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, num_heads, seq_len, head_dim]
+
+        # Scaled Dot-Product Attention
+        attn_scores = (q @ k) * self.scale  # [B, num_heads, N, seq_len]
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.attn_drop(attn_weights)
+
+        attn_output = (attn_weights @ v).permute(0, 2, 1, 3).reshape(B, N, C)  # [B, seq_len, embed_dim]
+        attn_output = self.proj(attn_output)
+        attn_output = self.proj_drop(attn_output)
+
+        return attn_output, attn_weights
+
+class CrossAttentionModule(nn.Module):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.1, drop_path=0.0):
+        """
+        Cross Attention Module with Self-Attention followed by Cross-Attention.
+        
+        Args:
+            embed_dim (int): Dimension of embeddings.
+            num_heads (int): Number of attention heads.
+            mlp_ratio (float): Expansion ratio for MLP.
+            dropout (float): Dropout rate.
+            drop_path (float): Drop path rate.
+        """
+        super(CrossAttentionModule, self).__init__()
+
+        # Self-Attention for each modality
+        self.self_attn_a = CrossAttention(embed_dim, num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
+        self.self_attn_v = CrossAttention(embed_dim, num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
+
+        # Cross-Attention between modalities
+        self.cross_attn_a_to_v = CrossAttention(embed_dim, num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
+        self.cross_attn_v_to_a = CrossAttention(embed_dim, num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
+
+        # LayerNorm
+        self.norm1_a = nn.LayerNorm(embed_dim)
+        self.norm1_v = nn.LayerNorm(embed_dim)
+        self.norm2_a = nn.LayerNorm(embed_dim)
+        self.norm2_v = nn.LayerNorm(embed_dim)
+
+        # MLP
+        self.mlp_a = Mlp(in_features=embed_dim, hidden_features=int(embed_dim * mlp_ratio), drop=dropout)
+        self.mlp_v = Mlp(in_features=embed_dim, hidden_features=int(embed_dim * mlp_ratio), drop=dropout)
+
+        # DropPath
+        self.drop_path = nn.Identity() if drop_path == 0.0 else nn.Dropout(drop_path)
+
+    def forward(self, a, v):
+        """
+        Forward pass for Cross Attention Module.
+        
+        Args:
+            a (torch.Tensor): Audio features [batch_size, seq_len_a, embed_dim].
+            v (torch.Tensor): Vision features [batch_size, seq_len_v, embed_dim].
+
+        Returns:
+            a (torch.Tensor): Updated audio features [batch_size, seq_len_a, embed_dim].
+            v (torch.Tensor): Updated vision features [batch_size, seq_len_v, embed_dim].
+        """
+
+        # === Step 1: Self-Attention ===
+        # a_res = a
+        # v_res = v
+        # a = self.self_attn_a(self.norm1_a(a)) + self.drop_path(a_res)
+        # v = self.self_attn_v(self.norm1_v(v)) + self.drop_path(v_res)
+
+        # === Step 2: Cross-Attention ===
+        # Audio attends to Vision
+        a_res = a
+        v_res = v
+
+        # Normalize inputs and perform cross-attention
+        a_cross = self.cross_attn_a_to_v(self.norm1_a(a), kv=self.norm1_v(v))
+        v_cross = self.cross_attn_v_to_a(self.norm1_v(v), kv=self.norm1_a(a))
+
+        # Add residual connections
+        a = a_cross + self.drop_path(a_res)
+        v = v_cross + self.drop_path(v_res)
+
+        # === Step 3: MLP ===
+        a_res = a
+        v_res = v
+        a = self.mlp_a(self.norm2_a(a)) + self.drop_path(a_res)
+        v = self.mlp_v(self.norm2_v(v)) + self.drop_path(v_res)
+
+        return a, v
 
 # our main proposed model, for pretraining only, for finetuning, use CAVMAEFT class
 class CAVMAE(nn.Module):
@@ -464,7 +681,7 @@ class CAVMAE(nn.Module):
 class CAVMAEFT(nn.Module):
     def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True,
-                 prompt_length=16, num_layers=4):
+                 prompt_length=16, num_layers=4, with_fusion=False):
         super().__init__()
         timm.models.vision_transformer.Block = Block
         print('Use norm_pix_loss: ', norm_pix_loss)
@@ -501,6 +718,12 @@ class CAVMAEFT(nn.Module):
         self.vision_only_token = nn.Parameter(torch.randn(num_layers, prompt_length, embed_dim))
         self.noise_to_both_token = nn.Parameter(torch.randn(num_layers, prompt_length, embed_dim))
         
+        self.audio_token = nn.Parameter(torch.randn(num_layers, prompt_length, embed_dim))
+        self.vision_token = nn.Parameter(torch.randn(num_layers, prompt_length, embed_dim))
+        
+        self.with_fusion = with_fusion
+        if with_fusion:
+            self.blocks_fusion = nn.ModuleList([CrossAttentionModule(embed_dim, num_heads, mlp_ratio, dropout=0.1) for i in range(4)])
         self.num_layers = num_layers
         
         self.initialize_weights()
@@ -555,8 +778,28 @@ class CAVMAEFT(nn.Module):
             for blk in self.blocks_v:
                 v = blk(v)
 
+            if self.with_fusion:
+                for blk in self.blocks_fusion:
+                    a, v = blk(a, v)
+            
             prompt_dict = {1: self.complete_token, 2: self.vision_only_token, 3: self.audio_only_token, 4: self.noise_to_both_token}
             additional_token = prompt_dict[case]
+            
+            num_layers, prompt_length, embed_dim = additional_token.size()
+            
+            extended_token = torch.zeros(num_layers, 4 * prompt_length, embed_dim)
+            
+            # 각 케이스 처리
+            if case == 1:  # complete_token
+                extended_token[:, :prompt_length, :] = additional_token
+            elif case == 2:  # vision_only_token
+                extended_token[:, prompt_length:2 * prompt_length, :] = additional_token
+            elif case == 3:  # audio_only_token
+                extended_token[:, 2 * prompt_length:3 * prompt_length, :] = additional_token
+            elif case == 4:  # noise_to_both_token
+                extended_token[:, 3 * prompt_length:, :] = additional_token
+            else:
+                raise ValueError("Invalid case provided.")
             
             batch_size = a.size(0)
             
@@ -590,67 +833,34 @@ class CAVMAEFT(nn.Module):
             v = v + self.pos_embed_v + self.modality_v
             for blk in self.blocks_v:
                 v = blk(v)
-            
-            #additional token : [1, 4, 768]
-            #-> [B, 4, 768]
-            batch_size = a.size(0)
+                
+            if self.with_fusion:
+                for blk in self.blocks_fusion:
+                    a, v = blk(a, v)
+
+            prompt_dict = {1: self.complete_token, 2: self.vision_only_token, 3: self.audio_only_token, 4: self.noise_to_both_token}
             additional_token = torch.cat([self.complete_token, self.vision_only_token, self.audio_only_token, self.noise_to_both_token], dim=1)
-            # additional_token = self.noise_to_both_token
-            additional_token_expanded = additional_token.expand(batch_size, -1, -1)
-            device = a.device
-            
-            additional_token_expanded = additional_token_expanded.to(device)
-            a = torch.cat([additional_token_expanded, a], dim=1)
-            v = torch.cat([additional_token_expanded, v], dim=1)
+            batch_size = a.size(0)
             
             x = torch.cat((a, v), dim=1)
-            for blk in self.blocks_u:
-                x = blk(x)
-            x = self.norm(x)
-            
-            x = x.mean(dim=1)
-            x = self.mlp_head(x)
-            return x
-        
-        if mode == 'prompt_learning_with_input':
-            a = a.unsqueeze(1).transpose(2, 3)
-            a = self.patch_embed_a(a)
-            a = a + self.pos_embed_a + self.modality_a
-            for blk in self.blocks_a:
-                a = blk(a)
-
-            v = self.patch_embed_v(v)
-            v = v + self.pos_embed_v + self.modality_v
-            for blk in self.blocks_v:
-                v = blk(v)
-            
-            prompts = self.additional_token
-            
-            # additional_token : [num_layers, 16, 768]
-            for i, blk in enumerate(self.transformer.blocks):
-                if i in self.prompt_layers:
-                    if self.multi_layer_prompt:
-                        x = blk(x, prompts=prompts[:,self.prompt_layers.index(i)], 
-                                    learnt_p=self.learnt_p,
-                                    prompt_type=self.prompt_type)
-                    else:
-                        x = blk(x, prompts=prompts, learnt_p=self.learnt_p)
+                
+            for i, blk in enumerate(self.blocks_u):
+                if i <= self.num_layers - 1:
+                    # prompt i번째 차원만 입력
+                    # [num_layers, 16, 768] -> [16, 768]
+                    additional_token = additional_token[i]
+                    # [16, 768] -> [B, 16, 768]
+                    additional_token_expanded = additional_token.expand(batch_size, -1, -1)
+                    x = blk(x, prompt=additional_token_expanded)
                 else:
                     x = blk(x)
-        
-            if self.prompt_type == 'input':
-                total_prompt_len = len(self.prompt_layers)* prompts.shape[-2]
-            elif self.prompt_type == 'attention':
-                total_prompt_len = prompts.shape[-2]
-        
-            x = x[:,total_prompt_len : ]
-            
             x = self.norm(x)
-            x = x.mean(dim=1) 
+
+            x = x.mean(dim=1)
             x = self.mlp_head(x)
-            
+
             return x
-            
+        
         if mode == 'multimodal':
             a = a.unsqueeze(1)
             a = a.transpose(2, 3)
@@ -667,7 +877,11 @@ class CAVMAEFT(nn.Module):
 
             for blk in self.blocks_v:
                 v = blk(v)
-
+                
+            if self.with_fusion:
+                for blk in self.blocks_fusion:
+                    a, v = blk(a, v)
+                    
             x = torch.cat((a, v), dim=1)
 
             for blk in self.blocks_u:
