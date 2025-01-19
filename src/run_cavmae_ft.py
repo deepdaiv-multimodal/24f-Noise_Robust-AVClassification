@@ -81,6 +81,8 @@ parser.add_argument('--skip_frame_agg', help='if do frame agg', type=ast.literal
 parser.add_argument('--noise_to_audio', help='if add noise to audio', action='store_true')
 parser.add_argument('--noise_to_vision', help='if add noise to image', action='store_true')
 
+parser.add_argument('--with_fusion', help='if use fusion', action='store_true')
+
 args = parser.parse_args()
 
 # all exp in this work is based on 224 * 224 image
@@ -119,7 +121,7 @@ if args.data_eval != None:
 
 if args.model == 'cav-mae-ft':
     print('finetune a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, with_fusion=args.with_fusion)
 else:
     raise ValueError('model not supported')
 
