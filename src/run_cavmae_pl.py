@@ -86,6 +86,8 @@ parser.add_argument('--mode', type=str, default='train', help='train or eval')
 parser.add_argument('--noise_to_audio', help='if add noise to audio', action='store_true')
 parser.add_argument('--noise_to_vision', help='if add noise to vision', action='store_true')
 
+parser.add_argument('--with_fusion', help='if use fusion', action='store_true')
+
 args = parser.parse_args()
 
 def train_run(mode):
@@ -105,7 +107,7 @@ def train_run(mode):
             batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
     if args.model == 'cav-mae-ft':
-        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, with_fusion=args.with_fusion)
     else:
         raise ValueError('model not supported')
 
@@ -152,7 +154,7 @@ def train_run(mode):
 #     return sdA
 
 def eval_run():
-    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, dir_path=args.exp_dir, prompt_inference=True)
+    audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, with_fusion=args.with_fusion)
     val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                     'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False}
     
@@ -164,11 +166,37 @@ def eval_run():
     miss, unexpected = audio_model.load_state_dict(mdl_weight, strict=False)
     
     print('now load cav-mae fine-tuned weights from ', args.finetuned_path)
-    print(miss, unexpected)
+    print("Missing keys:", miss)
+    print("Unexpected keys:", unexpected)
     
+    # 토큰 파일 로드
+    token_paths = {
+        "complete": f"{args.exp_dir}/complete.pth",
+        "audio_only": f"{args.exp_dir}/audio_only.pth",
+        "vision_only": f"{args.exp_dir}/vision_only.pth",
+        "noise_to_both": f"{args.exp_dir}/noise_to_both.pth"
+    }
+    
+    try:
+        audio_model.module.complete_token.data = torch.load(token_paths["complete"])
+        audio_model.module.audio_only_token.data = torch.load(token_paths["audio_only"])
+        audio_model.module.vision_only_token.data = torch.load(token_paths["vision_only"])
+        audio_model.module.noise_to_both_token.data = torch.load(token_paths["noise_to_both"])
+        print("Tokens loaded successfully from:", args.exp_dir)
+    except Exception as e:
+        print(f"Error loading tokens: {e}")
+        raise
+
+    # 데이터 로더 생성
+    val_audio_conf = {
+        'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0,
+        'dataset': args.dataset, 'mode': 'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False
+    }
     val_loader = torch.utils.data.DataLoader(
         dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf),
-        batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+        batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True
+    )
+    
     if not isinstance(audio_model, torch.nn.DataParallel):
         audio_model = torch.nn.DataParallel(audio_model)
     audio_model = audio_model.to('cuda')
@@ -193,7 +221,7 @@ def eval_run():
     print('now load cav-mae fine-tuned weights from ', args.finetuned_path)
     print(miss, unexpected)
     
-    stats, loss = validate(audio_model, val_loader, args)
+    stats, loss = validate(audio_model, val_loader, args, noise_to_audio=args.noise_to_audio, noise_to_vision=args.noise_to_vision)
     
     print("*** Fine-tuning ***")
     AP_res = np.mean([stat['AP'] for stat in stats])
